@@ -1,0 +1,10 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+.DS_Store
+
+data/healthy_watersheds/
+data/netcdf/
+output/rabo_bd_spatial_data.gpkg
