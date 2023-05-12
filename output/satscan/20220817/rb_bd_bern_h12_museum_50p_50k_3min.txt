@@ -1,0 +1,172 @@
+                                 _____________________________
+
+                                         SaTScan v9.6
+                                 _____________________________
+
+
+Program run on: Wed Aug 17 17:34:35 2022
+
+Purely Spatial analysis
+scanning for clusters with high or low rates
+using the Bernoulli model.
+Iterative analysis performed.
+_______________________________________________________________________________________________
+
+SUMMARY OF DATA
+
+Study period.......................: 2000/1/1 to 2000/12/31
+Number of locations................: 143
+Total population...................: 461
+Total number of cases..............: 39
+Percent cases in area..............: 8.5
+_______________________________________________________________________________________________
+
+MOST LIKELY CLUSTER
+
+1.Location IDs included.: 180201250402, 180201230705, 180201230702, 180201230406, 180201250702,
+                          180201210803, 180201210606, 180201250604
+  Coordinates / radius..: (39.666776 N, 120.968434 W) / 43.39 km
+  Population............: 17
+  Number of cases.......: 12
+  Expected cases........: 1.44
+  Observed / expected...: 8.34
+  Relative risk.........: 11.61
+  Percent cases in area.: 70.6
+  Log likelihood ratio..: 21.565238
+  Monte Carlo rank......: 1/1000
+  P-value...............: 0.001
+_______________________________________________________________________________________________
+
+REMAINING DATA WITH 1 CLUSTER REMOVED
+
+Number of locations................: 135
+Total population...................: 444
+Total number of cases..............: 27
+Percent cases in area..............: 6.1
+_______________________________________________________________________________________________
+
+
+MOST LIKELY CLUSTER
+
+2.Location IDs included.: 180500040301, 180500040403, 180400020301
+  Coordinates / radius..: (37.556720 N, 121.595075 W) / 21.57 km
+  Population............: 17
+  Number of cases.......: 10
+  Expected cases........: 1.03
+  Observed / expected...: 9.67
+  Relative risk.........: 14.78
+  Percent cases in area.: 58.8
+  Log likelihood ratio..: 18.786440
+  Monte Carlo rank......: 1/1000
+  P-value...............: 0.001
+_______________________________________________________________________________________________
+
+REMAINING DATA WITH 2 CLUSTERS REMOVED
+
+Number of locations................: 132
+Total population...................: 427
+Total number of cases..............: 17
+Percent cases in area..............: 4.0
+_______________________________________________________________________________________________
+
+
+MOST LIKELY CLUSTER
+
+3.Location IDs included.: 180701060205
+  Coordinates / radius..: (34.245278 N, 117.920365 W) / 0 km
+  Population............: 9
+  Number of cases.......: 3
+  Expected cases........: 0.36
+  Observed / expected...: 8.37
+  Relative risk.........: 9.95
+  Percent cases in area.: 33.3
+  Log likelihood ratio..: 4.416258
+  Monte Carlo rank......: 189/1000
+  P-value...............: 0.189
+_______________________________________________________________________________________________
+
+PARAMETER SETTINGS
+
+Input
+-----
+  Case File        : /Users/rapeek/Documents/github/rabo_bd/output/satscan/v3/rb_bd_bern_h12_museum.cas
+  Control File     : /Users/rapeek/Documents/github/rabo_bd/output/satscan/v3/rb_bd_bern_h12_museum.ctl
+  Time Precision   : None
+  Start Time       : 2000/1/1
+  End Time         : 2000/12/31
+  Coordinates File : /Users/rapeek/Documents/github/rabo_bd/output/satscan/v3/rb_bd_bern_h12_museum.geo
+  Coordinates      : Latitude/Longitude
+
+Analysis
+--------
+  Type of Analysis    : Purely Spatial
+  Probability Model   : Bernoulli
+  Scan for Areas with : High or Low Rates
+
+Output
+------
+  Main Results File       : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220817/rb_bd_bern_h12_museum_50p_50k_3min.txt
+  Google Maps File        : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220817/rb_bd_bern_h12_museum_50p_50k_3min.clustermap.html
+  Shapefile               : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220817/rb_bd_bern_h12_museum_50p_50k_3min.clustermap.col.shp
+  Cluster File            : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220817/rb_bd_bern_h12_museum_50p_50k_3min.clustermap.col.dbf
+  Stratified Cluster File : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220817/rb_bd_bern_h12_museum_50p_50k_3min.clustermap.sci.dbf
+  Location File           : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220817/rb_bd_bern_h12_museum_50p_50k_3min.clustermap.gis.dbf
+  Risk Estimates File     : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220817/rb_bd_bern_h12_museum_50p_50k_3min.clustermap.rr.dbf
+  Simulated LLRs File     : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220817/rb_bd_bern_h12_museum_50p_50k_3min.clustermap.llr.dbf
+
+Data Checking
+-------------
+  Temporal Data Check     : Check to ensure that all cases and controls are within the specified temporal study period.
+  Geographical Data Check : Check to ensure that all observations (cases, controls and populations) are within the specified geographical area.
+
+Spatial Neighbors
+-----------------
+  Use Non-Euclidian Neighbors file : No
+  Use Meta Locations File          : No
+  Multiple Coordinates Type        : Allow only one set of coordinates per location ID.
+
+Spatial Window
+--------------
+  Maximum Spatial Cluster Size : 50 percent of population at risk
+  Maximum Spatial Cluster Size : 50 km
+  Window Shape                 : Circular
+  Isotonic Scan                : No
+
+Cluster Restrictions
+--------------------
+  Minimum Cases in Cluster for High Rates : 3
+  Restrict High Rate Clusters             : No
+  Restrict Low Rate Clusters              : No
+
+Inference
+---------
+  P-Value Reporting                  : Standard Monte Carlo
+  Report Gumbel Based P-Values       : No
+  Number of Replications             : 999
+  Adjusting for More Likely Clusters : Yes
+  Maximum number of iterations       : 10
+  Stop when p-value greater          : 0.05
+
+Spatial Output
+--------------
+  Automatically Launch Map                  : Yes
+  Report Hierarchical Clusters              : Yes
+  Criteria for Reporting Secondary Clusters : No Geographical Overlap
+  Report Gini Optimized Cluster Collection  : No
+  Restrict Reporting to Smaller Clusters    : No
+
+Other Output
+------------
+  Report Critical Values  : No
+  Report Monte Carlo Rank : Yes
+
+Run Options
+-----------
+  Processor Usage   : All Available Processors
+  Suppress Warnings : No
+  Logging Analysis  : No
+_______________________________________________________________________________________________
+
+Program completed  : Wed Aug 17 17:34:42 2022
+Total Running Time : 7 seconds
+Processor Usage    : 8 processors

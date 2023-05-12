@@ -1,0 +1,133 @@
+ <!DOCTYPE html> 
+ <html lang="en"> 
+     <head> 
+         <title>Cluster Map</title> 
+         <meta name="viewport" content="initial-scale=1.0, user-scalable=no" charset="utf-8"> 
+         <link href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/css/bootstrap.min.css" rel="stylesheet"> 
+         <style type="text/css"> 
+          body {background-color: #f0f8ff;} 
+          #chartContainer{ overflow: hidden; } 
+          .chart-options{ display:none; } 
+          .chart-options{ padding:10px 0 10px 0; background-color:#e6eef2; border:1px solid silver; } 
+          .options-row{ margin:0 10px 10px 10px } 
+          .options-row>label:first-child, .options-row detail{ color:#13369f; font-weight:bold; } 
+          .options-row input[type='radio']{ margin:5px } 
+          p.help-block{ font-size:11px; color:#666; font-style:oblique; margin-top:0; } 
+          .main-content{ margin: 5px; } 
+          .options-row label{ font-weight: normal; } 
+          input[type=checkbox]{ margin-right:5px; } 
+          label.option-section{ border-bottom: solid 1px #e6e9eb; width: 100 % ; } 
+          .chart-column{ padding-top: 20px; padding-bottom: 30px; border-left: 1px solid #ddd; } 
+          .print-section a{ padding-right: 20px; text-decoration: none; } 
+          .cluster-selection{ border-bottom: dashed 1px #e6e9eb; } 
+          .cluster-selection label{ white-space: nowrap; color: #313030; } 
+          #id_display_count { margin:10px; } 
+          fieldset { margin-top: 10px; } 
+          @media print{ title{ display: none; } #id_banner { display: none; } .chart-options-section{ display: none; } #chartContainer{ margin: 20px; } .chart-column{ border-left: 0; } } 
+          @media print{ img { max-width: none !important; } a[href]:after { content: ""; } } 
+          #map-outer { height: 440px; padding: 20px; } 
+          #map { height: 400px; box-shadow: 1px 1px 8px #999;} 
+          @media all and (max-width: 991px) { #map-outer  { height: 650px } } 
+          table.info-window td { padding: 3px; } 
+         </style> 
+         <script type='text/javascript' src='https://www.satscan.org/javascript/jquery/jquery-1.12.4/jquery-1.12.4.js'></script> 
+         <script type='text/javascript' src='https://www.satscan.org/javascript/clustercharts/jQuery.resizeEnd.js'></script> 
+         <script type='text/javascript' src='https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/js/bootstrap.min.js'></script> 
+     </head> 
+     <body> 
+         <table id="id_banner" width="100%" border="0" cellpadding="0" cellspacing="0" bgcolor="#F8FAFA" style="border-bottom: 3px double navy;"> 
+         <tbody><tr> 
+         <td width="120" align="center" bgcolor="#DBD7DB"><img src="https://www.satscan.org/images/swe2.jpg" alt="&Ouml;stersund map" title="ճtersund map" width="120" height="115" hspace="1" border="0"></td> 
+         <td align="right" bgcolor="#D4DCE5"><img src="https://www.satscan.org/images/satscan_title2.jpg" alt="SaTScan&#0153; - Software for the spatial, temporal, and space-time scan statistics" title="SaTScan&#0153; - Software for the spatial, temporal, and space-time scan statistics" width="470" height="115"></td> 
+         <td width="25%" bgcolor="#F8FAFA" align="right"><img src="https://www.satscan.org/images/nyc2.jpg" alt="New York City map" title="New York City map" width="112" height="115" hspace="1" border="0" align="middle"></td> 
+         </tr></tbody></table> 
+ 		<div id="load_error" style="color:#101010; text-align: center;font-size: 1.2em; padding: 20px;background-color: #ece1e1; border: 1px solid #e49595; display:none;"></div> 
+     <div class="container-fluid main-content"> 
+         <div class="row"> 
+             <div id="map-outer" class="col-md-12"> 
+             <div class="col-md-3 chart-options-section"> 
+                 <fieldset> 
+                 <!-- 
+                 <div class="options-row"> 
+                     <label class="option-section" for="title_obs">Title</label> 
+                     <div>
+                         <input type="text" style="width:95%;padding:1px;" class="title-setter" id="title_obs" value="Cartesian Coordinates Map"> 
+                         <p class="help-block">Title can be changed by editing this text.</p> 
+                     </div> 
+                 </div> 
+                 --> 
+                 <div class="options-row"> 
+                     <label class="option-section" for="title_obs">Print</label> 
+                     <div class="print-section"> 
+                         <a href="#" onclick="javascript:window.print();return false;"><span class="glyphicon glyphicon-print" aria-hidden="true"></span> Print</a> 
+                         <!-- <a href="#" id="print_png"><span class="glyphicon glyphicon-picture" aria-hidden = "true"></span> Save Image</a> --> 
+                     </div> 
+                 </div> 
+                 <div class="options-row"> 
+                     <div id="id_significance_option">
+                         <label><input type="radio" name="view_significance" id="id_view_significant" value="entire" checked=checked />Significant clusters</label>
+                         <label><input type="radio" name="view_significance" id="id_view_all" value="cluster" />All clusters</label>
+                         <p class="help-block">Toggle display between significant and all clusters.</p>
+                     </div>
+                     <div id="id_rates_option"> 
+                         <label><input type="radio" name="view_rate" id="id_view_highlow" value="entire" checked=checked />High and low clusters</label>
+                         <label><input type="radio" name="view_rate" id="id_view_high" value="cluster"/>High only</label>
+                         <label><input type="radio" name="view_rate" id="id_view_low" value="cluster"/>Low only</label>
+                         <p class="help-block">Toggle display of clusters for scan rate.</p>
+                     </div> 
+                     <div id="id_secondary_clusters_option"> 
+                         <div>Secondary Clusters:</div>
+                         <label style="margin-left:15px;"><input type="checkbox" id="id_hierarchical" value="secondary" />Hierarchical</label>
+                         <label style="margin-left:15px;"><input type="checkbox" id="id_gini" value="secondary" />Gini</label>
+                         <p class="help-block">Display options for secondary clusters.</p>
+                     </div> 
+                     <div>Show clusters using:</div>
+                     <label style="margin-left:15px;"><input type="checkbox" id="id_cluster_circles" value="cluster" checked=checked />Circles</label>
+                     <label style="margin-left:15px;"><input type="checkbox" id="id_cluster_locations" value="cluster" checked=checked />Locations</label>
+                     <p class="help-block">Display options for clusters.</p>
+                     <!-- <label><input type="checkbox" id="id_show_grid_lines" checked=checked />Show grid lines</label> 
+                     <p class="help-block">Toggle display of graph grid lines.</p> --> 
+                     <label><input type="checkbox" id="id_show_location_points" />Show all location points</label>
+                     <p class="help-block">Toggle display of location points.</p>
+                     <label><input type="checkbox" id="id_fit_graph_viewport" checked=checked />Fit map to viewport</label>
+                     <p class="help-block">Attempts to keep entire map in view.</p>
+                 </div> 
+                 <div id="id_display_count">
+                     <fieldset>
+                             <legend style="font-size:14px; margin-bottom:0;">Display Data:</legend>
+                             <div><span id="id_cluster_count"></span> Clusters</div>
+                             <div><span id="id_cluster_point_count"></span> Cluster Locations</div>
+                             <div><span id="id_point_count"></span> Total Locations</div> 
+                     </fieldset>
+                 </div>
+                 </fieldset> 
+                 <div style="font-style:italic; font-size:smaller;">Generated with SaTScan v9.6</div>
+             </div> 
+             <div class="xx-col-md-9 chart-column" id="map"></div> 
+             </div> 
+         </div> 
+      </div> 
+         <script type='text/javascript'> 
+             var parameters = {scanrate:3/*high=1,low=2,highorlow=3*/,giniscan:false};
+             if (parameters.scanrate != 3) { $('#id_rates_option').hide(); }
+             if (!parameters.giniscan) { $('#id_secondary_clusters_option').hide(); }
+             var entire_region_points = [[-123.615254, 39.677242],[-123.780272, 40.018559],[-123.788442, 40.129514],[-123.640585, 40.974594],[-121.883865, 40.981359],[-121.405140, 39.853776],[-121.446190, 39.731212],[-121.152829, 39.202772],[-120.920420, 39.226511],[-122.589850, 40.639302],[-122.641362, 40.070234],[-122.059985, 38.498748],[-119.926458, 37.849291],[-120.349481, 38.476264],[-120.689757, 36.541242],[-122.644890, 37.959304],[-120.875603, 36.416879],[-121.300793, 35.883328]]; 
+             var display_stats = {};
+             var clusters = [ 
+             { id: 1, significant : true, highrate : false, lat : 36.370846, lng : -120.573127, radius : 20852.616059, hierarchical : true, gini : false, color : '#5F8EBD', pointscolor : '#1AC6FF', tip : '<div style="text-decoration:underline; ">Cluster 1</div>Population : 255<br>Number of cases : 35<br>Expected cases : 93.33<br>Observed / expected : 0.38<br>Relative risk : 0.34<br>Percent cases in area : 13.7<br>P-value : 0.001<br>', points : [[-120.573127, 36.370846],[-120.531907, 36.288733],[-120.465989, 36.410922],[-120.701792, 36.340899],[-120.722746, 36.430909],[-120.805686, 36.376095]] },
+{ id: 1, significant : true, highrate : false, lat : 42.061227, lng : -123.187818, radius : 41168.291421, hierarchical : true, gini : false, color : '#5F8EBD', pointscolor : '#1AC6FF', tip : '<div style="text-decoration:underline; ">Cluster 2</div>Population : 30<br>Number of cases : 1<br>Expected cases : 12.27<br>Observed / expected : 0.082<br>Relative risk : 0.080<br>Percent cases in area : 3.3<br>P-value : 0.001<br>', points : [[-123.187818, 42.061227],[-123.646119, 42.207035]] },
+{ id: 1, significant : true, highrate : true, lat : 41.237530, lng : -124.030050, radius : 154.734092, hierarchical : true, gini : false, color : '#F13C3F', pointscolor : '#FF1A1A', tip : '<div style="text-decoration:underline; ">Cluster 3</div>Population : 47<br>Number of cases : 35<br>Expected cases : 19.62<br>Observed / expected : 1.78<br>Relative risk : 1.84<br>Percent cases in area : 74.5<br>P-value : 0.001<br>', points : [[-124.030050, 41.237530]] },
+{ id: 1, significant : true, highrate : true, lat : 37.449836, lng : -121.772333, radius : 48762.432438, hierarchical : true, gini : false, color : '#F13C3F', pointscolor : '#FF1A1A', tip : '<div style="text-decoration:underline; ">Cluster 4</div>Population : 471<br>Number of cases : 228<br>Expected cases : 190.98<br>Observed / expected : 1.19<br>Relative risk : 1.35<br>Percent cases in area : 48.4<br>P-value : 0.001<br>', points : [[-121.772333, 37.449836],[-121.758761, 37.496101],[-121.771760, 37.561003],[-121.457355, 37.090599]] },
+{ id: 1, significant : true, highrate : true, lat : 39.891897, lng : -121.000110, radius : 25206.484694, hierarchical : true, gini : false, color : '#F13C3F', pointscolor : '#FF1A1A', tip : '<div style="text-decoration:underline; ">Cluster 5</div>Population : 230<br>Number of cases : 106<br>Expected cases : 82.73<br>Observed / expected : 1.28<br>Relative risk : 1.44<br>Percent cases in area : 46.1<br>P-value : 0.004<br>', points : [[-121.000110, 39.891897],[-120.951892, 39.935459],[-121.077602, 39.964726],[-120.968434, 39.666776]] },
+{ id: 1, significant : true, highrate : true, lat : 35.795172, lng : -121.266298, radius : 154.734092, hierarchical : true, gini : false, color : '#F13C3F', pointscolor : '#FF1A1A', tip : '<div style="text-decoration:underline; ">Cluster 6</div>Population : 22<br>Number of cases : 16<br>Expected cases : 7.03<br>Observed / expected : 2.28<br>Relative risk : 2.40<br>Percent cases in area : 72.7<br>P-value : 0.002<br>', points : [[-121.266298, 35.795172]] },
+{ id: 1, significant : true, highrate : true, lat : 39.256756, lng : -120.812096, radius : 3780.457153, hierarchical : true, gini : false, color : '#F13C3F', pointscolor : '#FF1A1A', tip : '<div style="text-decoration:underline; ">Cluster 7</div>Population : 15<br>Number of cases : 11<br>Expected cases : 4.55<br>Observed / expected : 2.42<br>Relative risk : 2.52<br>Percent cases in area : 73.3<br>P-value : 0.007<br>', points : [[-120.812096, 39.256756],[-120.813315, 39.222809]] },
+{ id: 1, significant : false, highrate : false, lat : 41.775269, lng : -123.836851, radius : 154.734092, hierarchical : true, gini : false, color : '#5F8EBD', pointscolor : '#1AC6FF', tip : '<div style="text-decoration:underline; ">Cluster 8</div>Population : 19<br>Number of cases : 1<br>Expected cases : 5.54<br>Observed / expected : 0.18<br>Relative risk : 0.18<br>Percent cases in area : 5.3<br>P-value : 0.059<br>', points : [[-123.836851, 41.775269]] } 
+             ]; 
+             clusters.reverse();
+             var resource_path = 'https://www.satscan.org/'; 
+     </script> 
+     <script src='https://www.satscan.org/javascript/clustercharts/mapgoogle-1.0.js'></script> 
+   </body> 
+ </html> 
+
+

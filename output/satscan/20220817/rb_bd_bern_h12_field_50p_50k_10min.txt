@@ -1,0 +1,292 @@
+                                 _____________________________
+
+                                         SaTScan v9.6
+                                 _____________________________
+
+
+Program run on: Wed Aug 17 17:28:21 2022
+
+Purely Spatial analysis
+scanning for clusters with high or low rates
+using the Bernoulli model.
+Iterative analysis performed.
+_______________________________________________________________________________________________
+
+SUMMARY OF DATA
+
+Study period.......................: 2000/1/1 to 2000/12/31
+Number of locations................: 39
+Total population...................: 1612
+Total number of cases..............: 590
+Percent cases in area..............: 36.6
+_______________________________________________________________________________________________
+
+MOST LIKELY CLUSTER
+
+1.Location IDs included.: 180300090601, 180300120602, 180300090605, 180600020501, 180400140302,
+                          180600020502
+  Coordinates / radius..: (36.370846 N, 120.573127 W) / 20.82 km
+  Population............: 255
+  Number of cases.......: 35
+  Expected cases........: 93.33
+  Observed / expected...: 0.38
+  Relative risk.........: 0.34
+  Percent cases in area.: 13.7
+  Log likelihood ratio..: 38.771294
+  Monte Carlo rank......: 1/1000
+  P-value...............: 0.001
+_______________________________________________________________________________________________
+
+REMAINING DATA WITH 1 CLUSTER REMOVED
+
+Number of locations................: 33
+Total population...................: 1357
+Total number of cases..............: 555
+Percent cases in area..............: 40.9
+_______________________________________________________________________________________________
+
+
+MOST LIKELY CLUSTER
+
+2.Location IDs included.: 171003090107, 171003110601
+  Coordinates / radius..: (42.061227 N, 123.187818 W) / 41.10 km
+  Population............: 30
+  Number of cases.......: 1
+  Expected cases........: 12.27
+  Observed / expected...: 0.082
+  Relative risk.........: 0.080
+  Percent cases in area.: 3.3
+  Log likelihood ratio..: 11.959057
+  Monte Carlo rank......: 1/1000
+  P-value...............: 0.001
+_______________________________________________________________________________________________
+
+REMAINING DATA WITH 2 CLUSTERS REMOVED
+
+Number of locations................: 31
+Total population...................: 1327
+Total number of cases..............: 554
+Percent cases in area..............: 41.7
+_______________________________________________________________________________________________
+
+
+MOST LIKELY CLUSTER
+
+3.Location IDs included.: 180101020106
+  Coordinates / radius..: (41.237530 N, 124.030050 W) / 0 km
+  Population............: 47
+  Number of cases.......: 35
+  Expected cases........: 19.62
+  Observed / expected...: 1.78
+  Relative risk.........: 1.84
+  Percent cases in area.: 74.5
+  Log likelihood ratio..: 10.737725
+  Monte Carlo rank......: 1/1000
+  P-value...............: 0.001
+_______________________________________________________________________________________________
+
+REMAINING DATA WITH 3 CLUSTERS REMOVED
+
+Number of locations................: 30
+Total population...................: 1280
+Total number of cases..............: 519
+Percent cases in area..............: 40.5
+_______________________________________________________________________________________________
+
+
+MOST LIKELY CLUSTER
+
+4.Location IDs included.: 180500040103, 180500040602, 180500040601, 180500030103
+  Coordinates / radius..: (37.449836 N, 121.772333 W) / 48.68 km
+  Population............: 471
+  Number of cases.......: 228
+  Expected cases........: 190.98
+  Observed / expected...: 1.19
+  Relative risk.........: 1.35
+  Percent cases in area.: 48.4
+  Log likelihood ratio..: 9.503050
+  Monte Carlo rank......: 1/1000
+  P-value...............: 0.001
+_______________________________________________________________________________________________
+
+REMAINING DATA WITH 4 CLUSTERS REMOVED
+
+Number of locations................: 26
+Total population...................: 809
+Total number of cases..............: 291
+Percent cases in area..............: 36.0
+_______________________________________________________________________________________________
+
+
+MOST LIKELY CLUSTER
+
+5.Location IDs included.: 180201220802, 180201220804, 180201220803, 180201250402
+  Coordinates / radius..: (39.891897 N, 121.000110 W) / 25.16 km
+  Population............: 230
+  Number of cases.......: 106
+  Expected cases........: 82.73
+  Observed / expected...: 1.28
+  Relative risk.........: 1.44
+  Percent cases in area.: 46.1
+  Log likelihood ratio..: 7.012246
+  Monte Carlo rank......: 4/1000
+  P-value...............: 0.004
+_______________________________________________________________________________________________
+
+REMAINING DATA WITH 5 CLUSTERS REMOVED
+
+Number of locations................: 22
+Total population...................: 579
+Total number of cases..............: 185
+Percent cases in area..............: 32.0
+_______________________________________________________________________________________________
+
+
+MOST LIKELY CLUSTER
+
+6.Location IDs included.: 180600060306
+  Coordinates / radius..: (35.795172 N, 121.266298 W) / 0 km
+  Population............: 22
+  Number of cases.......: 16
+  Expected cases........: 7.03
+  Observed / expected...: 2.28
+  Relative risk.........: 2.40
+  Percent cases in area.: 72.7
+  Log likelihood ratio..: 8.009207
+  Monte Carlo rank......: 2/1000
+  P-value...............: 0.002
+_______________________________________________________________________________________________
+
+REMAINING DATA WITH 6 CLUSTERS REMOVED
+
+Number of locations................: 21
+Total population...................: 557
+Total number of cases..............: 169
+Percent cases in area..............: 30.3
+_______________________________________________________________________________________________
+
+
+MOST LIKELY CLUSTER
+
+7.Location IDs included.: 180201260101, 180201260103
+  Coordinates / radius..: (39.256756 N, 120.812096 W) / 3.77 km
+  Population............: 15
+  Number of cases.......: 11
+  Expected cases........: 4.55
+  Observed / expected...: 2.42
+  Relative risk.........: 2.52
+  Percent cases in area.: 73.3
+  Log likelihood ratio..: 6.049739
+  Monte Carlo rank......: 7/1000
+  P-value...............: 0.007
+_______________________________________________________________________________________________
+
+REMAINING DATA WITH 7 CLUSTERS REMOVED
+
+Number of locations................: 19
+Total population...................: 542
+Total number of cases..............: 158
+Percent cases in area..............: 29.2
+_______________________________________________________________________________________________
+
+
+MOST LIKELY CLUSTER
+
+8.Location IDs included.: 180101010305
+  Coordinates / radius..: (41.775269 N, 123.836851 W) / 0 km
+  Population............: 19
+  Number of cases.......: 1
+  Expected cases........: 5.54
+  Observed / expected...: 0.18
+  Relative risk.........: 0.18
+  Percent cases in area.: 5.3
+  Log likelihood ratio..: 3.613054
+  Monte Carlo rank......: 59/1000
+  P-value...............: 0.059
+_______________________________________________________________________________________________
+
+PARAMETER SETTINGS
+
+Input
+-----
+  Case File        : /Users/rapeek/Documents/github/rabo_bd/output/satscan/v3/rb_bd_bern_h12_field.cas
+  Control File     : /Users/rapeek/Documents/github/rabo_bd/output/satscan/v3/rb_bd_bern_h12_field.ctl
+  Time Precision   : None
+  Start Time       : 2000/1/1
+  End Time         : 2000/12/31
+  Coordinates File : /Users/rapeek/Documents/github/rabo_bd/output/satscan/v3/rb_bd_bern_h12_field.geo
+  Coordinates      : Latitude/Longitude
+
+Analysis
+--------
+  Type of Analysis    : Purely Spatial
+  Probability Model   : Bernoulli
+  Scan for Areas with : High or Low Rates
+
+Output
+------
+  Main Results File       : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220810/rb_bd_bern_h12_field_50p_50k_10min.txt
+  Google Maps File        : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220810/rb_bd_bern_h12_field_50p_50k_10min.clustermap.html
+  Shapefile               : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220810/rb_bd_bern_h12_field_50p_50k_10min.clustermap.col.shp
+  Cluster File            : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220810/rb_bd_bern_h12_field_50p_50k_10min.clustermap.col.dbf
+  Stratified Cluster File : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220810/rb_bd_bern_h12_field_50p_50k_10min.clustermap.sci.dbf
+  Location File           : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220810/rb_bd_bern_h12_field_50p_50k_10min.clustermap.gis.dbf
+  Risk Estimates File     : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220810/rb_bd_bern_h12_field_50p_50k_10min.clustermap.rr.dbf
+  Simulated LLRs File     : /Users/rapeek/Documents/github/rabo_bd/output/satscan/20220810/rb_bd_bern_h12_field_50p_50k_10min.clustermap.llr.dbf
+
+Data Checking
+-------------
+  Temporal Data Check     : Check to ensure that all cases and controls are within the specified temporal study period.
+  Geographical Data Check : Check to ensure that all observations (cases, controls and populations) are within the specified geographical area.
+
+Spatial Neighbors
+-----------------
+  Use Non-Euclidian Neighbors file : No
+  Use Meta Locations File          : No
+  Multiple Coordinates Type        : Allow only one set of coordinates per location ID.
+
+Spatial Window
+--------------
+  Maximum Spatial Cluster Size : 50 percent of population at risk
+  Maximum Spatial Cluster Size : 50 km
+  Window Shape                 : Circular
+  Isotonic Scan                : No
+
+Cluster Restrictions
+--------------------
+  Minimum Cases in Cluster for High Rates : 10
+  Restrict High Rate Clusters             : No
+  Restrict Low Rate Clusters              : No
+
+Inference
+---------
+  P-Value Reporting                  : Standard Monte Carlo
+  Report Gumbel Based P-Values       : No
+  Number of Replications             : 999
+  Adjusting for More Likely Clusters : Yes
+  Maximum number of iterations       : 10
+  Stop when p-value greater          : 0.05
+
+Spatial Output
+--------------
+  Automatically Launch Map                  : Yes
+  Report Hierarchical Clusters              : Yes
+  Criteria for Reporting Secondary Clusters : No Geographical Overlap
+  Report Gini Optimized Cluster Collection  : No
+  Restrict Reporting to Smaller Clusters    : No
+
+Other Output
+------------
+  Report Critical Values  : No
+  Report Monte Carlo Rank : Yes
+
+Run Options
+-----------
+  Processor Usage   : All Available Processors
+  Suppress Warnings : No
+  Logging Analysis  : No
+_______________________________________________________________________________________________
+
+Program completed  : Wed Aug 17 17:28:43 2022
+Total Running Time : 22 seconds
+Processor Usage    : 8 processors
