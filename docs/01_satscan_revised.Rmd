@@ -1,0 +1,409 @@
+---
+title: "SatScan Spatial Clustering"
+description: |
+  Revised Model Notes (updated `r Sys.Date()`)
+date: "Updated `r Sys.Date()`"
+output: distill::distill_article
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(here)
+library(dplyr)
+library(knitr)
+library(sf)
+library(glue)
+library(purrr)
+library(RColorBrewer)
+
+library(mapview)
+mapviewOptions(fgb=FALSE)
+
+source(here("scripts","functions.R"))
+
+h12 <- read_sf(here("output", "rabo_bd_spatial_data.gpkg"), "HUC12")
+
+h12_cent <- h12 %>% 
+  #st_transform(3310) %>%
+  mutate(lon=map_dbl(geom, ~st_centroid(.x)[[1]]),
+         lat=map_dbl(geom, ~st_centroid(.x)[[2]])) %>% 
+  st_drop_geometry() %>% 
+  st_as_sf(coords=c("lon","lat"), crs=4269, remove=FALSE)
+
+rb_covar <- read_rds(here("output", "10a_rb_bd_all_covars_recap_filt.rds"))
+
+rb_mus <- rb_covar %>% 
+  filter(!is.na(bd_positive)) %>%  # drops 2 records
+  # drop duplicates
+  distinct(sampleid, .keep_all = TRUE) %>% 
+  mutate( sampleid2 = janitor::make_clean_names(sampleid), .after=sampleid) %>%
+  filter(field_or_museum=="Museum") %>% #n=461
+  st_as_sf(coords=c("longitude_dd", "latitude_dd"), crs=4269, remove=FALSE)
+
+rb_fld <- rb_covar %>% 
+  filter(!is.na(bd_positive)) %>%  # drops 1 records, n=1684
+  # drop duplicates
+  distinct(sampleid, .keep_all = TRUE) %>% 
+  mutate( sampleid2 = janitor::make_clean_names(sampleid), .after=sampleid) %>%
+  filter(field_or_museum=="Field") %>% 
+  st_as_sf(coords=c("longitude_dd", "latitude_dd"), crs=4269, remove=FALSE) #n=1635
+
+```
+
+## Objective via SatScan
+
+ >  - Identify spatial hot spots (clusters) of Bd across the range of *Rana boylii*
+ >  - Identify spatial *cold* spots where Bd does not seem to be prevalent, across the range of *Rana boylii*
+
+Word doc:  *https://docs.google.com/document/d/1o5JyJ2bxNk9UzxmF3OkmcAevNA6vr1ctPSoFbB0lcpc/edit#*
+
+## How SatScan Works
+
+SatScan gradually scans using a circular spatial window of different sizes across a study area, adjusting for the dissimilar geographical distribution of the population, and conditioned on the total observed cases in the population.
+
+When the spatial clusters are large, it can be difficult to infer patterns and relationships, though secondary analysis of each cluster can be used to identify specific areas of higher importance inside the clusters.
+
+This is how we've discussed using SatScan, as an initial approach to identifying spatial clusters across the range of our data, and then follow up within each of these clusters to assess potential covariates influence on Bd using AR1 models (to incorporate temporal trends).
+
+## SatScan Settings
+
+This is a bulleted overview of some of the main settings that we are using or have used, either as defaults of SatScan, or as parameters that are being actively changed between different model runs.
+
+ - **Iterative Scan statistic:**  adjusts the p-values of secondary clusters for more likely clusters that are found and reported. This is done by doing the analysis in several iterations, removing the most likely cluster found in each iteration, and then reanalyzing the remaining data. The user must specify the maximum number of iterations allowed, in the range 1-32000. The user may also request that the iterations stop when the last found cluster has a p-value greater than a specified lower bound.
+    - each iteration takes approximately the same amount of time as a regular analysis with the same parameters. It has been shown that the iterative scan statistic p-values are valid for a purely spatial analysis with the discrete Poisson model (which can be a good approx for the Bernoulli). The feature is also available for the other discrete scan statistics, but it is not know whether the p-values are as accurate. The iterative scan statistic is not available for space-time scan statistics, or for the continuous Poisson model.
+ - **Minimum number of cases:** For high rate clusters, it is possible to require that the detected clusters have at least a minimum number of cases. The default value is 2. By putting a higher value, such as 5, there will be no high rate clusters with less than 5 cases. This will slightly increase the power to find clusters with 5 or more cases. Note that this feature does not restrict the collection of potential clusters that are evaluated, nor does it affect the evaluation of low rate clusters. **Need to select minimum number of cases for high rate clusters *before* study is completed**
+ - **Maximum Spatial Cluster Size:** Cluster size between 0 and some percent of population, or as a geographic size. Can specify less than but not more than 50%. When in doubt, choose a high percentage, since SaTScan will then look for clusters of both small and large sizes without any pre-selection bias in terms of the cluster size. When calculating the percentage, SaTScan uses the population defined by the cases and controls for the Bernoulli model, the covariate adjusted population at risk from the population file for the discrete Poisson model, the cases for the space-time permutation.
+
+## RABO Bd Model Approach
+
+We have looked at a variety of different approaches to how we can aggregate our data. For our purposes, it likely makes the most sense to aggregate the point data to a Hydrologic Unit Code or HUC^[see [here for data](https://databasin.org/maps/8df84d8ed5f34cac8d1f54d5c97fdd77/) ]. HUCs are hierarchically nested watershed units that can be used for a variety of analyses. The lower the HUC number (i.e., HUC4), the larger the watershed unit. The finest scale HUC (smallest watershed unit) is HUC12, and the largest is HUC2.
+
+```{r, echo=FALSE, out.height='70%', fig.cap='HUC Hydrologic Boundary Dataset, figure from USGS'}
+
+include_graphics("../figs/WBD_Base_HUStructure_small.png")
+
+# from https://www.usgs.gov/media/images/watershed-boundary-dataset-structure-visualization
+
+```
+
+### Binning by HUC12
+
+To leverage our data more effectively, and move our point data to a scale equivalent to many of the covariates, I binned the Bd point data to a HUC12 scale, as well as ran a set of data using the individual points.
+
+ - This entailed joining the Bd point data with the HUC layers, so for any given data point, we have the corresponding HUC12 for that point.
+ - We then grouped data by HUC12, and summarized by counting the total number of postive or negative Bd samples that occurred in a given HUC unit. 
+ - These data were then used in the SatScan models as 
+    - cases (number of positives per HUC, **`.cas`** file) 
+    - controls (number of negatives per HUC, **`.ctl`** file) 
+    - geographic locations, (all HUC locations that had data, **`.geo`** file)
+
+# Final Models
+
+We ran a final set of purely spatial models using a Bernoulli model that used HUC12 aggregation, a 50km maximum window, and either 3 minimum individuals for the museum data or 10 minimum individuals for field data to be classified as a high-rate cluster, a circular spatial window, and without isotonic spatial scan statistics. Inference used a standard Monte Carlo with 999 replications, adjustment for more likely clusters, and 10 iterations and pval <0.05.
+
+Settings were as follows:
+
+ - HTML for google map
+ - shapefile for GIS
+ - dBase for everything else
+ - No geographical overlap in clusters
+ - scan for high and low values
+ - Iterative Scan (n=10, stop when p > 0.05)
+ - column headers in ASCII outputs
+ - critical values for obs cluster to be significant
+ 
+
+## Field Only
+
+A Bernoulli model identified 4 high-rate clusters, and 4 low rate clusters that were significant. The cluster localities align with the other models, though this model identified more low rate clusters than any other, and on the north coast.
+
+
+### HUC12: 50 percent, 50km max, 10 min
+
+ - Gray points are all HUC12 centroids that were not selected as part of a cluster.
+ - Cluster ID is the membership of significant HUC12 centroids.
+ - Rel. Risk is the uniformly sized relative risk for each significant cluster.
+ - Rel. Risk polys is the size scaled by radius (based on the log odds and p-value)
+
+```{r map1b, echo=FALSE, message=FALSE}
+
+modrun <- "rb_bd_bern_h12_field_50p_50k_10min"
+moddir <- "output/satscan/20220817"
+
+m1_pts <- st_read(here(glue("{moddir}/{modrun}.gis.shp")), quiet = TRUE)
+m1_col <- st_read(here(glue("{moddir}/{modrun}.col.shp")), quiet = TRUE)
+pts_outside <- st_read(here(glue("{moddir}/{modrun}.rr.dbf")), quiet = TRUE)
+
+# merge w hucs
+pts_outside <- inner_join(h12_cent, pts_outside, by=c("huc12"="LOC_ID")) %>% 
+  select(name, huc12, OBSERVED:REL_RISK) %>% filter(REL_RISK < 0.2)
+
+# get just centroids
+m1_sig <- m1_col %>% filter(P_VALUE<0.05) %>% # note this is diff, was 0.1
+  mutate(lon=map_dbl(geometry, ~st_centroid(.x)[[1]]),
+         lat=map_dbl(geometry, ~st_centroid(.x)[[2]])) %>% 
+  st_drop_geometry() %>% 
+  st_as_sf(coords=c("lon","lat"), crs=4269, remove=FALSE)
+  
+# map
+# note we changed P_VAL cutoff to 0.05 instead of 0.1
+mapview(m1_sig %>% filter(P_VALUE<0.05), zcol="REL_RISK", layer.name="Rel. Risk", cex=20,
+        col.regions=rev(RColorBrewer::brewer.pal(length(m1_sig$REL_RISK), "RdBu"))) + 
+  mapview(m1_col %>% filter(P_VALUE<0.05), zcol="REL_RISK", layer.name="Rel. Risk (polys)",
+        col.regions=rev(RColorBrewer::brewer.pal(length(m1_col$REL_RISK), "RdBu")), legend=FALSE) + 
+  mapview(pts_outside, col.regions="gray50", alpha.regions=0.5, cex=3, 
+            layer.name="Non-Sig<br>H12") +
+  mapview(m1_pts %>% filter(LOC_RR>0, P_VALUE<0.05), zcol="CLUSTER", cex=5, alpha.regions=0.4,
+          layer.name="Field:<br>Cluster ID")
+
+```
+
+```{r map1b-static, echo=FALSE, message=FALSE, comment=FALSE, out.width='800px'}
+
+library(tigris)
+library(ggplot2)
+
+#counties <- counties(state = c("CA", "OR"), cb=TRUE) %>% st_transform(4326)
+#write_rds(counties, file = "output/counties_ca_or.rds")
+counties <- readr::read_rds(here::here("output/counties_ca_or.rds"))
+
+# set range of palette so 1 is in middle
+limitcol <- max(abs(m1_col$REL_RISK)) * c(0, 1)
+
+gg1b <- ggplot() + geom_sf(data=counties, fill="gray90", lwd=0.5, alpha=0.5) + 
+  hrbrthemes::theme_ipsum_rc() +
+  labs(subtitle="Relative Risk of Sig. Clusters for Field SATSCAN")+
+  geom_sf(data=m1_sig %>% filter(P_VALUE<0.05), aes(fill=REL_RISK), size=7, pch=21) +
+  scale_fill_distiller(palette = 'RdBu', limit = limitcol, "Rel. Risk")
+
+```
+
+```{r mod1b, echo=F, eval=T}
+
+file_in <- here(glue("{moddir}/{modrun}.txt"))
+
+# get summary of data
+read_lines(file_in, skip=find_skip(file_in, "SUMMARY OF DATA"), n_max = 4, skip_empty_rows = TRUE)
+
+# get analysis 
+read_lines(file_in, skip=find_skip(file_in, "^Analysis"), n_max = 4, skip_empty_rows = TRUE)
+
+# get settings for model run
+cat(read_lines(file_in, skip=find_skip(file_in, "Multiple Coordinates Type"), n_max = 30, skip_empty_rows = TRUE), sep = "\n")
+
+```
+
+## Museum
+
+A Bernoulli model identified 2 high rate clusters that were significant, with one additional non-significant cluster in Los Angeles (San Gabriel River). The two clusters are largely synonymous with cluster locations from the other models.
+
+### HUC12: 50 percent, 50km max, 3 min
+
+ - Gray points are all HUC12 centroids that were not selected as part of a cluster.
+ - Cluster ID is the membership of significant (or nearly so) HUC12 centroids.
+ - Rel. Risk is the uniformly sized relative risk for each significant cluster.
+ - Rel. Risk polys is the size scaled by radius (based on the log odds and p-value)
+
+
+```{r map2b, echo=FALSE, message=FALSE}
+
+modrun <- "rb_bd_bern_h12_museum_50p_50k_3min"
+moddir <- "output/satscan/20220817"
+
+m1_pts <- st_read(here(glue("{moddir}/{modrun}.gis.shp")), quiet = TRUE)
+m1_col <- st_read(here(glue("{moddir}/{modrun}.col.shp")), quiet = TRUE) %>% 
+  filter(P_VALUE<0.1)
+pts_outside <- st_read(here(glue("{moddir}/{modrun}.rr.dbf")), quiet = TRUE)
+
+# merge w hucs
+pts_outside <- inner_join(h12_cent, pts_outside, by=c("huc12"="LOC_ID")) %>% 
+  select(name, huc12, OBSERVED:REL_RISK) %>% filter(REL_RISK == 0)
+
+# get just centroids
+m1_sig <- m1_col %>% 
+  mutate(lon=map_dbl(geometry, ~st_centroid(.x)[[1]]),
+         lat=map_dbl(geometry, ~st_centroid(.x)[[2]])) %>% 
+  st_drop_geometry() %>% 
+  st_as_sf(coords=c("lon","lat"), crs=4269, remove=FALSE)
+  
+# map
+mapview(m1_sig, zcol="REL_RISK", layer.name="Rel. Risk", cex=20,
+        col.regions=RColorBrewer::brewer.pal(length(m1_sig$REL_RISK), "RdBu")) + 
+  mapview(m1_col, zcol="REL_RISK", legend=FALSE,
+          layer.name="Rel. Risk (polys)",
+        col.regions=RColorBrewer::brewer.pal(length(m1_col$REL_RISK), "RdBu")) + 
+  mapview(pts_outside, col.regions="gray50", alpha.regions=0.5, cex=3, 
+            layer.name="Non-Sig<br>H12") +
+  mapview(m1_pts %>% filter(LOC_RR>0), zcol="CLUSTER", cex=5, alpha.regions=0.4,
+          layer.name="Museum:<br>Cluster ID")
+
+```
+
+```{r map2b-static, echo=FALSE, message=FALSE}
+
+library(tigris)
+library(ggplot2)
+
+# set range of palette so 1 is in middle
+limitcol <- max(abs(m1_col$REL_RISK)) * c(0, 1)
+
+ggplot() + geom_sf(data=counties, fill="gray90", lwd=0.5, alpha=0.5) + 
+  hrbrthemes::theme_ipsum_rc() +
+  labs(subtitle="Relative Risk of Sig. Clusters for Museum SATSCAN")+
+  geom_sf(data=m1_sig, aes(fill=REL_RISK), size=7, pch=21) +
+  scale_fill_distiller(palette = 'RdBu', limit = limitcol, "Rel. Risk")
+
+```
+
+```{r mod2b, echo=F, eval=T}
+
+file_in <- here(glue("{moddir}/{modrun}.txt"))
+
+# get summary of data
+read_lines(file_in, skip=find_skip(file_in, "SUMMARY OF DATA"), n_max = 4, skip_empty_rows = TRUE)
+
+# get analysis 
+read_lines(file_in, skip=find_skip(file_in, "^Analysis"), n_max = 4, skip_empty_rows = TRUE)
+
+# get settings for model run
+cat(read_lines(file_in, skip=find_skip(file_in, "Multiple Coordinates Type"), n_max = 30, skip_empty_rows = TRUE), sep = "\n")
+
+```
+
+
+## ITS Models
+
+ITS models used the individual ITS load (log transformed) by both HUC12 and as individual points and a normal distribution. The HUC12 scaled model found 5 clusters, 4 high rate clusters and one low-rate cluster. These clusters largely match the Field and Museum clusters identified previously. The Individual scaled model found only two high-rate clusters.
+
+### HUC12 ITS: 50 percent, 50km max, 10 min
+
+ - Gray points are all HUC12 centroids that were not selected as part of a cluster (non-significant).
+ - Cluster ID is the membership of significant HUC12 centroids.
+ - Cluster Type is whether the cluster was high-rate or low-rate.
+ - SatScan polys is the significant clusters scaled by radius (based on the log odds and p-value)
+
+```{r map3b, echo=FALSE, message=FALSE}
+
+modrun <- "rb_bd_norm_h12_its_50p_50k_10min"
+moddir <- "output/satscan/20210907"
+
+m1_pts <- st_read(here(glue("{moddir}/{modrun}.gis.shp")), quiet = TRUE)
+m1_col <- st_read(here(glue("{moddir}/{modrun}.col.shp")), quiet = TRUE) %>% 
+  filter(P_VALUE<0.05)
+pts_outside <- st_read(here(glue("{moddir}/{modrun}.rr.dbf")), quiet = TRUE)
+
+# merge w hucs
+pts_outside <- inner_join(h12_cent, pts_outside, by=c("huc12"="LOC_ID")) %>% 
+  select(name, huc12, MEAN:STD)
+
+# get just centroids
+m1_sig <- m1_col %>% filter(P_VALUE<0.05) %>% 
+  mutate(lon=map_dbl(geometry, ~st_centroid(.x)[[1]]),
+         lat=map_dbl(geometry, ~st_centroid(.x)[[2]]),
+         ClustType = case_when(
+           MEAN_IN > MEAN_OUT ~ "Hi",
+           TRUE ~ "Lo")) %>% 
+  st_drop_geometry() %>% 
+  st_as_sf(coords=c("lon","lat"), crs=4269, remove=FALSE)
+  
+# map
+mapview(m1_sig, zcol="ClustType", 
+        layer.name="Cluster Type", cex=20,
+        col.regions=ifelse(m1_sig$ClustType == "Hi", "maroon", "steelblue")) +
+  mapview(m1_col, zcol="RADIUS", layer.name="SatScan polys",
+         col.regions=ifelse(m1_sig$ClustType == "Hi", "maroon", "steelblue"),
+         legend=FALSE) + 
+  mapview(m1_pts %>% filter(P_VALUE>0.05), col.regions="gray50", alpha.regions=0.5, cex=3, layer.name="NonSig<br>H12 Centroids") +
+  mapview(m1_pts %>% filter(P_VALUE<0.05), zcol="CLUSTER", cex=5, alpha.regions=0.4,
+          layer.name="Field:<br>Cluster ID")
+
+```
+
+```{r mod3b, echo=F, eval=T}
+
+file_in <- here(glue("{moddir}/{modrun}.txt"))
+
+# get summary of data
+read_lines(file_in, skip=find_skip(file_in, "SUMMARY OF DATA"), n_max = 4, skip_empty_rows = TRUE)
+
+# get analysis 
+read_lines(file_in, skip=find_skip(file_in, "^Analysis"), n_max = 4, skip_empty_rows = TRUE)
+
+# get settings for model run
+cat(read_lines(file_in, skip=find_skip(file_in, "Multiple Coordinates Type"), n_max = 30, skip_empty_rows = TRUE), sep = "\n")
+
+```
+
+### INDIV ITS: 50 percent, 50km max, 10 min
+
+ - Gray points are all HUC12 centroids that were not selected as part of a cluster (non-significant).
+ - Cluster ID is the membership of significant HUC12 centroids.
+ - Cluster Type is whether the cluster was high-rate or low-rate.
+ - SatScan polys is the significant clusters scaled by radius (based on the log odds and p-value)
+
+```{r map4b, echo=FALSE, message=FALSE}
+
+modrun <- "rb_bd_norm_ind_its_50p_50k_10min"
+moddir <- "output/satscan/20210907"
+
+m1_pts <- st_read(here(glue("{moddir}/{modrun}.gis.shp")), quiet = TRUE)
+m1_col <- st_read(here(glue("{moddir}/{modrun}.col.shp")), quiet = TRUE) %>% 
+  filter(P_VALUE < 0.05)
+
+pts_outside <- rb_fld %>% filter(bd_its_copies>0) %>% 
+  anti_join(., m1_pts %>% st_drop_geometry, by=c("sampleid2"="LOC_ID")) %>% 
+  distinct(geometry, .keep_all = TRUE)
+
+# get just centroids
+m1_sig <- m1_col %>% filter(P_VALUE<0.05) %>% 
+  mutate(lon=map_dbl(geometry, ~st_centroid(.x)[[1]]),
+         lat=map_dbl(geometry, ~st_centroid(.x)[[2]]),
+         ClustType = case_when(
+           MEAN_IN > MEAN_OUT ~ "Hi",
+           TRUE ~ "Lo")) %>% 
+  st_drop_geometry() %>% 
+  st_as_sf(coords=c("lon","lat"), crs=4269, remove=FALSE)
+  
+# map
+mapview(m1_sig, zcol="ClustType", 
+        layer.name="Cluster Type", cex=20,
+        col.regions=ifelse(m1_sig$ClustType == "Hi", "maroon", "steelblue")) +
+  mapview(m1_col, zcol="RADIUS", layer.name="SatScan polys",
+         col.regions=ifelse(m1_sig$ClustType == "Hi", "maroon", "steelblue"),
+         legend=FALSE)
+```
+
+```{r mod4b, echo=F, eval=T}
+
+file_in <- here(glue("{moddir}/{modrun}.txt"))
+
+# get summary of data
+read_lines(file_in, skip=find_skip(file_in, "SUMMARY OF DATA"), n_max = 4, skip_empty_rows = TRUE)
+
+# get analysis 
+read_lines(file_in, skip=find_skip(file_in, "^Analysis"), n_max = 4, skip_empty_rows = TRUE)
+
+# get settings for model run
+cat(read_lines(file_in, skip=find_skip(file_in, "Multiple Coordinates Type"), n_max = 30, skip_empty_rows = TRUE), sep = "\n")
+
+```
+
+ 
+```{r figh12time, echo=FALSE, layout="l-page", out.height='100%', fig.cap='Year by latitude Bd all samples'}
+
+include_graphics(here("figs/year_by_lat_for_museum_v_field_all_samples_wR2_all_w_map.png"))
+
+
+```
+
+
+
+## Citations
+
+Kulldorff, M., A spatial scan statistic. Communications in Statistics - Theory and Methods, 1997. 26(6): p. 1481-1496.
+
+Kulldorff, M., An isotonic spatial scan statistic for geographical disease surveillance. Journal of the National Institute of Public Health, 1999. 48(2): p. 94-101.
+
+M. Genin, C. Preda, A. Duhamel, C. Gower-Rousseau - Isotonic spatial scan statistics: application to the epidemiology of Crohn’s disease in northern France. 2016. Oral Presentation. 10th International Seminar: Statistics and Clinical Practice, 2016, Warsaw.

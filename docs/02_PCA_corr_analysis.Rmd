@@ -1,0 +1,1146 @@
+---
+title: "Covariate Correlations and Reduction"
+description: |
+  PCA and BRTs (updated `r Sys.Date()`)
+output: 
+  distill::distill_article:
+    code_folding: true
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  comment = NA,
+  R.options = list(width = 70)
+)
+library(here)
+library(knitr)
+library(glue)
+#source(here("scripts","functions.R"))
+
+```
+
+# Approach
+
+To better understand drivers of variation in Bd across time and space, we need to figure out which covariates describe the most variation in our dataset. Using the large list of environmental, climatic, and life-history covariates, we can use several different approaches to identify which variables have the greatest importance or influence on variation in our dataset. We can use Principal Components Analysis (PCA) and boosted regression trees (BRT) approaches to determine variable importance across all data, and for each individual spatial clusters identified in the SatScan analysis.
+
+## Map Of Trends Through Time
+
+Here we look at positives through time, where the filled points are Bd+, and hollow gray are Bd-. There is a strong trend in the museum data along a latitudinal gradient, and little or no trend in the field based data.
+
+```{r figh12time, echo=FALSE, layout="l-page", out.height='100%', fig.cap='Year by latitude Bd all samples'}
+
+include_graphics(here("figs/year_by_lat_for_museum_v_field_all_samples_wR2_all_w_map.png"))
+
+
+```
+
+## Join SatScan Clusters
+
+We need to join the spatial cluster information to our data. Here we create a `clustrate` column which is based on each cluster risk ratio:
+
+ - 0: no cluster 
+ - 1: low rate (risk ratio < 1)
+ - 2: hi rate (risk ratio > 1)
+
+We use the 8 clusters identified for field data (4 low rate, 4 high rate), and the 2 clusters identified for the museum data plus one non-significant (statistically) cluster that is located in the San Gabriel River watershed, all were high rate.
+
+```{r importSATScanData, echo=TRUE}
+
+library(tidyverse)
+library(sf)
+
+# base data set:
+rb_covar <- read_rds(here("output", "09_rb_bd_all_covariates_joined.rds"))
+
+rb_mus <- rb_covar %>%
+  mutate( sampleid2 = janitor::make_clean_names(sampleid), .after=sampleid) %>%
+  filter(field_or_museum=="Museum") %>% #n=461
+  st_as_sf(coords=c("longitude_dd", "latitude_dd"), crs=4269, remove=FALSE)
+
+rb_fld <- rb_covar %>%
+  mutate( sampleid2 = janitor::make_clean_names(sampleid), .after=sampleid) %>%
+  filter(field_or_museum=="Field") %>% # n=1635
+  st_as_sf(coords=c("longitude_dd", "latitude_dd"), crs=4269, remove=FALSE) #n=1635
+
+# FIELD MODELS
+modrun <- "rb_bd_bern_h12_field_50p_50k_10min"
+moddir <- "output/satscan/20210907"
+
+fld_pts <- st_read(here(glue("{moddir}/{modrun}.gis.shp")), quiet = TRUE) %>% 
+  filter(P_VALUE<0.05)
+fld_col <- st_read(here(glue("{moddir}/{modrun}.col.shp")), quiet = TRUE)
+
+# need to assign to data?
+# first we filter to sig clusters (p<0.05) then join to give membership
+df_fld <- left_join(rb_fld, st_drop_geometry(fld_pts), 
+                    by = c("huc12"="LOC_ID")) %>% 
+  filter(!is.na(areasqkm)) %>% 
+  select(sampleid:boylii_clade,CLUSTER:CLU_POP, everything()) %>% 
+  mutate(CLUSTER = case_when(
+    is.na(CLUSTER) ~ 0, # not part of a cluster
+    TRUE ~ CLUSTER)) %>% 
+  mutate(clustrate = case_when(
+    CLUSTER==0 ~ 0,
+    CLU_RR < 1 ~ 1, # low rate cluster
+    CLU_RR >=1 ~ 2 # high rate cluster
+  ), .after=bd_positive) %>% 
+# reorder clusters north to south
+  mutate(CLUSTER = case_when(
+    CLUSTER == 2 ~ 1,
+    CLUSTER == 8 ~ 2,
+    CLUSTER == 3 ~ 3,
+    CLUSTER == 5 ~ 4, 
+    CLUSTER == 7 ~ 5,
+    CLUSTER == 4 ~ 6,
+    CLUSTER == 1 ~ 7, 
+    CLUSTER == 6 ~ 8,
+    TRUE ~ CLUSTER))
+
+#mapview::mapview(df_fld, zcol="CLUSTER_rev")
+# table(df_fld$CLUSTER, useNA="always")
+
+# MUSEUM MODELS
+modrun <- "rb_bd_bern_h12_museum_50p_50k_3min"
+moddir <- "output/satscan/20210907"
+
+# don't filter to p<0.05 here, want to include san gabriel cluster
+mus_pts <- st_read(here(glue("{moddir}/{modrun}.gis.shp")), quiet = TRUE)
+mus_col <- st_read(here(glue("{moddir}/{modrun}.col.shp")), quiet = TRUE)
+
+# join to give membership
+df_mus <- left_join(rb_mus, st_drop_geometry(mus_pts), by = c("huc12"="LOC_ID")) %>% 
+  filter(!is.na(PCT_WETLANDS_REMAINING)) %>% 
+  select(sampleid:boylii_clade,CLUSTER:CLU_POP, everything()) %>% 
+  mutate(CLUSTER = case_when(
+    is.na(CLUSTER) ~ 0, # NOT PART OF A CLUSTER
+    TRUE ~ CLUSTER)) %>% 
+  mutate(clustrate = case_when(
+    CLUSTER==0 ~ 0,
+    CLU_RR < 1 ~ 1,
+    CLU_RR >=1 ~ 2
+  ), .after=bd_positive)
+
+# table(df_mus$CLUSTER, useNA="always")
+# table(df_mus$clustrate, useNA="always")
+
+
+
+```
+
+## Look at Years Ranges per Cluster
+
+```{r boxplots}
+
+# museum cluster by year
+ggplot() + geom_boxplot(data=df_mus, aes(y=capt_yr, fill=as.factor(bd_positive), group=bd_positive), show.legend = TRUE) +
+  facet_grid(~CLUSTER) +
+  theme_classic() +
+  ggthemes::scale_fill_colorblind("Bd+") +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank())+
+  labs(y="Year Sampled", 
+       title="Museum Samples by Cluster",
+       caption="Clusters North to South, 0 = no cluster")
+#ggsave(filename = "figs/museum_samples_by_cluster_years_boxplot.png",
+#      width = 10, height = 8, dpi=300)
+
+ggplot() + geom_boxplot(data=df_fld, aes(y=capt_yr, fill=as.factor(bd_positive), group=bd_positive), show.legend = TRUE) +
+  facet_grid(~CLUSTER) +
+  theme_classic() +
+  ggthemes::scale_fill_colorblind("Bd+") +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank())+
+  labs(y="Year Sampled", 
+       title="Field Samples by Cluster",
+       caption="Clusters North to South, 0 = no cluster")
+#ggsave(filename = "figs/field_samples_by_cluster_years_boxplot.png",
+#       width = 10, height = 8, dpi=300)
+
+
+```
+
+
+# Correlation
+
+We used a correlation analysis (Pearson) to assess which variables were correlated across each of the Field and Museum datasets. We dropped observations that contained `NA`, and filtered to just numeric data before creating a correlation table.
+
+
+## Field Data
+
+```{r corr-field, echo=TRUE}
+
+library(corrr)
+# drop geometry, pull only numeric/integer data, and drop other noninfo cols
+corr_fld <- df_fld %>% st_drop_geometry() %>% 
+  select(where(is.numeric), where(is.integer)) %>% 
+  # filter a few vars out
+  filter(!is.na(areasqkm)) %>% 
+  # drop variables with NAs
+  select_if(~!any(is.na(.))) %>% 
+  # drop additional variables that are duplicative
+  select(-c(CLIMDIV, comid, X_ele, Y_ele, areaacres,
+            starts_with("bd_"), clustrate, CLUSTER)) %>% 
+  correlate() # pearson
+
+corr_fld  %>% 
+  rearrange(absolute = FALSE) %>% # order by corr
+  shave() %>% # take lower triangle only
+  rplot() +
+  theme(axis.text.x = element_text(angle=70, 
+                                   size = 7),
+        axis.text.y = element_text(size = 7)
+  )
+
+# stretch
+corr_fld %>%
+  rearrange() %>%
+  shave() %>% 
+  stretch(na.rm = TRUE) %>% 
+  #write_csv(file="output/field_covariate_correlations.csv")
+  DT::datatable()
+
+# network plot
+# corr_fld %>% 
+#   network_plot(min_cor = .3)
+# 
+# # focus on specific cols
+# corr_fld %>% focus(umct, capt_yr)
+
+
+```
+
+## Museum Data
+
+```{r corr-mus, echo=TRUE}
+
+library(corrr)
+# drop geometry, pull only numeric/integer data, and drop other noninfo cols
+corr_mus <- df_mus %>% st_drop_geometry() %>% 
+  select(where(is.numeric), where(is.integer)) %>% 
+  # drop variables with NAs
+  select_if(~!any(is.na(.))) %>% 
+  # drop additional variables that are duplicative
+  select(-c(CLIMDIV, areaacres, areaacres, Y_ele, X_ele, 
+            starts_with("bd_"), clustrate, CLUSTER)) %>% 
+  correlate()
+
+corr_mus  %>% 
+  rearrange(absolute = FALSE) %>% # order by corr
+  shave() %>% # take lower triangle only
+  rplot() +
+  theme(axis.text.x = element_text(angle=70, 
+                                   size = 7),
+        axis.text.y = element_text(size = 7)
+  )
+
+# stretch
+corr_mus %>%
+  rearrange() %>%
+  shave() %>% 
+  stretch(na.rm = TRUE) %>% 
+  #write_csv(file="output/museum_covariate_correlations.csv")
+  DT::datatable()
+
+
+```
+
+
+# PCA
+
+There are two potential scenarios for PCA:
+
+ 1. The PCA describes significant clustering in variables associated with clusters (we see structure): this means there is spatial variation in our Bd data.
+ 2. The PCA is one murky cloud of data, meaning the spatial clusters from SatScan are not well described by our covariates (variation is the same across the landscape).
+
+PCA requires no missing data and all numeric data. We split data into Museum and Field, and drop the Bd and Cluster Variables.
+
+## PCA Field
+
+Here we conduct a PCA using all field data, for all positive and negative Bd samples. 
+
+### Cluster Plots
+
+```{r pca-fieldBd, echo=TRUE, messages=FALSE}
+
+library(factoextra) # clustering visualization/stats
+library(cowplot)
+library(ggthemes)
+library(broom)
+library(purrr)
+
+# drop geometry, pull only numeric/integer data, and drop other noninfo cols
+pca_fld <- df_fld %>% st_drop_geometry() %>% 
+  select(where(is.numeric), where(is.integer)) %>% 
+  # filter a few vars out
+  filter(!is.na(areasqkm)) %>% 
+  # drop variables with NAs
+  select_if(~!any(is.na(.))) %>% 
+  select(-c(CLIMDIV, areaacres, comid, Y_ele, X_ele,
+            starts_with("bd_"), clustrate, CLUSTER)) %>% 
+  scale() %>% # scale the data
+  prcomp() # pca
+
+pca_fld %>%
+  # extract eigenvalues
+  tidy(matrix = "eigenvalues") -> pca_fld_eigs
+
+# get and view the loadings or eigs
+pca_fld %>% 
+  # extract the loading vals
+  tidy("loadings") %>% 
+  # filter to top 5 PCs
+  filter(PC %in% c(1:3)) %>% 
+  pivot_wider(names_from = PC, values_from=value, names_prefix = "PC") %>% 
+  DT::datatable(options = list(pageLength=20)) %>% 
+  DT::formatRound(c('PC1', 'PC2', 'PC3'), 3)
+```
+
+Here we can see the association or loading for each variable and each PC. So the year captured has a positive influence on PC1, while precipitation has a negative one. Each PC explains some amount of variation in the overall data, and the loading can be viewed as what degree a given variable contributes to that.
+
+Here are some PCA plots to better visualize our data.
+
+```{r pca-fieldPlots, echo=TRUE, layout="l-page", messages=FALSE}
+
+pca_fld_aug <- pca_fld %>% augment(df_fld)
+
+# plot by clade
+pca_fld %>% 
+  augment(df_fld) %>% 
+  ggplot(aes(.fittedPC1, .fittedPC2)) +
+  geom_point(aes(shape=as.factor(bd_positive), color=boylii_clade), alpha=0.8, size=4.5) + 
+  theme_classic() +
+  scale_color_discrete("Clade") +
+  scale_shape_discrete("Bd+") +
+  labs(title = "PCA: By Clade",
+       x=glue("PC1: {round(pca_fld_eigs$percent[1]*100, 1)}%"), 
+       y=glue("PC2: {round(pca_fld_eigs$percent[2]*100, 1)}%"))
+
+
+# plot by CLUSTER
+pca_fld %>% 
+  augment(df_fld) %>% #View()
+  #filter(!CLUSTER==0) %>% 
+  ggplot(aes(.fittedPC1, .fittedPC2)) + # 2 v 3 appears cleaner than 1v2
+  geom_point(aes(shape=as.factor(bd_positive), color=as.factor(CLUSTER)), alpha=0.8, size=4.5) + 
+  theme_classic() +
+  scale_color_discrete("Cluster") +
+  scale_shape_discrete("Bd+") +
+  #guides(shape="none") +
+  labs(title = "PCA: By Cluster",
+       caption="Cluster 0 means not part of a cluster",
+       x=glue("PC1: {round(pca_fld_eigs$percent[1]*100, 1)}%"), 
+       y=glue("PC2: {round(pca_fld_eigs$percent[2]*100, 1)}%"))
+
+
+# plot by CLUSTERRate
+pca_fld %>% 
+  augment(df_fld) %>% #View()
+  ggplot(aes(.fittedPC1, .fittedPC2)) + # 2 v 3 appears cleaner than 1v2
+  geom_point(aes(shape=as.factor(bd_positive), color=as.factor(clustrate)), alpha=0.8, size=4.5) + 
+  theme_classic() +
+  scale_color_discrete("Cluster") +
+  scale_shape_discrete("Bd+") +
+  #guides(shape="none") +
+  labs(title = "PCA: By Cluster Rate",
+       caption = "Cluster rate: 0 = no cluster, 1 = low rate, 2 = high rate",
+       x=glue("PC1: {round(pca_fld_eigs$percent[1]*100, 1)}%"), 
+       y=glue("PC2: {round(pca_fld_eigs$percent[2]*100, 1)}%"))
+
+```
+
+
+Generally the take away is the covariates in the data set describes a significant amount of variation, and they seem to be weighted fairly equally. There is collinearity, but the "variation space" is described by at least one or more variables in all four quadrants of the plot.
+
+My take away here is there is a fairly even mix of things, not a ton of strong structuring, which means the covariates are fairly evenly dispersed across the dataset.
+
+<aside> The PCA itself does not include Bd+/- or clusters, but we can color the plots that way to provide context. **Cluster 0** is samples that were not assigned a cluster. 
+</aside>
+
+### Loading Plot 
+
+We can visualize the loadings again, but instead of a table, we can use a PCA plot with arrows. Variables/arrows that point the same direction and similar lengths indicate highly influential and highly correlated variables. See `dmct` and `dm2d` or the `noaa` metrics.
+
+```{r field-PCAloadings, echo=TRUE, layout="l-page", messages=FALSE}
+
+# plot groups with loadings:
+(ggloadField <- factoextra::fviz_pca_biplot(pca_fld, geom = "point",
+                            col.var = "gray30",repel = TRUE, cex=0.8,
+                            habillage = as.factor(pca_fld_aug$CLUSTER)) +
+  theme_classic(base_size = 8) +
+  theme(text = element_text(size=7)) +
+  labs(title="PCA Biplot by SatScan Cluster (0=no cluster)"))
+
+```
+
+We can look at Rotation Matrix to see only variables and their association or loading with the variation. This is the same as above.
+
+```{r pca-rotation-fieldBd, layout="l-page", echo=FALSE, out.width="150%"}
+
+# set arrow style
+arrow_style <- arrow(
+  angle = 15, length = grid::unit(3, "pt"),
+  ends = "first", type = "open"
+)
+
+
+# extract rotation matrix
+pca_fld_rot <- pca_fld %>% 
+  tidy(matrix = "rotation") %>%
+  pivot_wider(
+    names_from = "PC", values_from = "value",
+    names_prefix = "PC")
+
+# plot
+ggplot(data=pca_fld_rot, aes(x=PC1, y=PC2, label=column)) +
+  geom_segment(
+    xend = 0, yend = 0,
+    arrow = arrow_style
+  ) +
+  ggrepel::geom_text_repel(data=pca_fld_rot, aes(label=column),
+                          max.overlaps = 14, size=3) +
+  theme_minimal_grid() +
+  #geom_text(aes(label = column), 
+  #          hjust = 1, size=2, family="Roboto Condensed") +
+  coord_fixed() +
+  labs(title="Rotation Matrix: Field Bd")
+
+#plotly::ggplotly(ggloads, tooltip = c("PC1","PC2","column"))
+# ggsave(filename = "figs/modeling_pca_rotation_vars_field_pc2_pc3.png", width = 11, height = 8,
+#       dpi=300)
+
+```
+
+### Cumulative Variance
+
+Finally we can look at variance and cumulative variance explained by our PC's. In this case, the first 5 PC's describe 50% of the data. 
+
+```{r pca-varexp-fieldBd, layout="l-page", echo=FALSE}
+
+# look at variance explained by PCs
+pca_fld %>%
+  # extract eigenvalues
+  tidy(matrix = "eigenvalues") %>% #slice(1:5)
+  ggplot(aes(PC, cumulative)) + 
+  geom_hline(yintercept = 0.5, lty=2, col="black") +
+  geom_col(alpha=0.2) + 
+  geom_col(data=. %>% slice(1:5), fill="blue") + 
+  scale_x_continuous(breaks = c(seq(1, 32, 2)), limits=c(0,32), expand = c(0,0)) +
+  scale_y_continuous(
+    name = "Variance explained by \n each PC",
+    # format y axis ticks as percent values
+    label = scales::label_percent(accuracy = 1)
+  ) + 
+  cowplot::theme_cowplot() +
+  labs(subtitle = "Field: Nearly half of the variation (49%) is explained by first 5 PCs")
+
+```
+
+
+## PCA Museum
+
+
+### Cluster Plots
+
+For museum data we see less structure in the PCA.
+
+```{r pca-mus-pca, echo=TRUE}
+
+pca_mus <- df_mus %>% st_drop_geometry() %>% 
+  select(where(is.numeric), where(is.integer)) %>% 
+  # drop variables with NAs
+  filter(!is.na(PCT_FOREST_REMAIN)) %>% 
+  select_if(~!any(is.na(.))) %>% 
+  select(-c(CLIMDIV, areaacres, starts_with("bd_"), clustrate, CLUSTER)) %>% 
+  scale() %>% # scale the data
+  prcomp() # pca
+
+pca_mus %>%
+  # extract eigenvalues
+  tidy(matrix = "eigenvalues") -> pca_mus_eigs
+
+pca_mus_aug <- pca_mus %>% augment(df_mus)
+
+# get and view the loadings or eigs
+pca_mus %>% 
+  # extract the loading vals
+  tidy("loadings") %>% 
+  # filter to top 5 PCs
+  filter(PC %in% c(1:3)) %>% 
+  pivot_wider(names_from = PC, values_from=value, names_prefix = "PC") %>% 
+  DT::datatable(options = list(pageLength=20)) %>% 
+  DT::formatRound(c('PC1', 'PC2', 'PC3'), 3)
+```
+
+
+```{r pca-mus-clust, layout="l-page", echo=TRUE}
+
+# plot by clade
+pca_mus %>% 
+  augment(df_mus) %>% # add all the variables back in
+  ggplot(aes(.fittedPC1, .fittedPC2)) +
+  geom_point(aes(shape=as.factor(bd_positive), color=boylii_clade), alpha=0.8, size=4.5) + 
+  theme_classic() +
+  scale_color_discrete("Clade") +
+  scale_shape_discrete("Bd+") +
+  labs(title = "PCA: By Clade",
+       x=glue("PC1: {round(pca_mus_eigs$percent[1]*100, 1)}%"), 
+       y=glue("PC2: {round(pca_mus_eigs$percent[2]*100, 1)}%"))
+
+
+# plot by CLUSTER
+pc1v2 <- pca_mus %>% 
+  augment(df_mus) %>% #View()
+  ggplot(aes(.fittedPC1, .fittedPC2)) + 
+  geom_point(aes(shape=as.factor(bd_positive), color=as.factor(CLUSTER)), alpha=0.8, size=4.5) + 
+  theme_classic() +
+  scale_color_discrete("Cluster") +
+  scale_shape_discrete("Bd+") +
+  #guides(shape="none") +
+  labs(title = "PCA: Cluster PC1vPC2",
+       x=glue("PC1: {round(pca_mus_eigs$percent[1]*100, 1)}%"), 
+       y=glue("PC2: {round(pca_mus_eigs$percent[2]*100, 1)}%"))
+
+pc3v4 <- pca_mus %>% 
+  augment(df_mus) %>% #View()
+  ggplot(aes(.fittedPC3, .fittedPC4)) + 
+  geom_point(aes(shape=as.factor(bd_positive), color=as.factor(CLUSTER)), alpha=0.8, size=4.5) + 
+  theme_classic() +
+  scale_color_discrete("Cluster") +
+  scale_shape_discrete("Bd+") +
+  #guides(shape="none") +
+  labs(title = "PCA: Cluster PC3vPC4",
+       x=glue("PC3: {round(pca_mus_eigs$percent[3]*100, 1)}%"), 
+       y=glue("PC4: {round(pca_mus_eigs$percent[4]*100, 1)}%"))
+
+plot_grid(pc1v2, pc3v4)
+```
+
+Plot without clusters (dropping cluster=0).
+
+```{r pca-mus-noclust}
+
+
+(pc1v2nc <- pca_mus %>% 
+  augment(df_mus) %>% #View()
+  filter(!CLUSTER==0) %>% 
+  ggplot(aes(.fittedPC1, .fittedPC2)) + 
+  geom_point(aes(shape=as.factor(bd_positive), color=as.factor(CLUSTER)), alpha=0.8, size=4.5) + 
+  theme_classic() +
+  scale_color_discrete("Cluster") +
+  scale_shape_discrete("Bd+") +
+  #guides(shape="none") +
+  labs(title = "PCA: Cluster PC1vPC2",
+       x=glue("PC1: {round(pca_mus_eigs$percent[1]*100, 1)}%"), 
+       y=glue("PC2: {round(pca_mus_eigs$percent[2]*100, 1)}%")))
+
+
+```
+
+### Loadings
+
+See description above. Definitely a few outliers to consider.
+
+```{r pca-mus-loadings, layout="l-page", echo=TRUE}
+
+# plot groups with loadings:
+factoextra::fviz_pca_biplot(pca_mus, geom = "point",
+                            col.var = "gray30",repel = TRUE,
+                            habillage = as.factor(pca_mus_aug$CLUSTER)) +
+  theme_classic() +
+  labs(title="PCA Biplot by SatScan Cluster (0=no cluster)")
+
+```
+
+Look at Rotation Matrix to see what variables are associated/driving the variation.
+
+```{r pca-rotation-mus, layout="l-page", echo=TRUE}
+
+# set arrow style
+arrow_style <- arrow(
+  angle = 15, length = grid::unit(3, "pt"),
+  ends = "first", type = "closed"
+)
+
+
+# extract rotation matrix
+pca_mus_rot <- pca_mus %>% 
+  tidy(matrix = "rotation") %>%
+  pivot_wider(
+    names_from = "PC", values_from = "value",
+    names_prefix = "PC")
+
+# plot
+ggplot(data=pca_mus_rot, aes(x=PC1, y=PC2, label=column)) +
+  geom_segment(
+    xend = 0, yend = 0,
+    arrow = arrow_style
+  ) +
+  ggrepel::geom_text_repel(data=pca_mus_rot, aes(label=column),
+                          max.overlaps = 14, size=3) +
+  #geom_text(aes(label = column), 
+  #          hjust = 1, size=2, family="Roboto Condensed") +
+  xlim(c(-0.4, 0.4)) +
+  theme_minimal_grid() +
+  #theme_bw() +
+  coord_fixed() +
+  labs(title="Rotation Matrix: Museum Bd 1/0")
+
+#ggsave(filename = "figs/modeling_pca_rotation_vars_mus_pc1_pc2.png", width = 11, height = 8,
+#       dpi=300)
+
+
+```
+
+### Cumulative Variance
+
+```{r pca-varexp-mus, layout="l-page", echo=TRUE}
+
+# look at variance explained by PCs
+pca_mus %>%
+  # extract eigenvalues
+  tidy(matrix = "eigenvalues") %>% #View()
+  ggplot(aes(PC, cumulative)) + 
+  geom_hline(yintercept = 0.5, lty=2, col="black") +
+  geom_col(alpha=0.2) + 
+  geom_col(data=. %>% slice(1:5), fill="blue") + 
+  scale_x_continuous(breaks = c(seq(1, 32, 2)), limits=c(0,32), expand = c(0,0)) +
+  scale_y_continuous(
+    name = "Variance explained by \n each PC",
+    # format y axis ticks as percent values
+    label = scales::label_percent(accuracy = 1)
+  ) + 
+  cowplot::theme_cowplot() +
+  labs(subtitle = "Museum: Over half of the variation (57%) is explained by first 5 PCs")
+
+
+```
+
+Overall a fairly similar situation as the field data.
+
+<!--
+
+# Boosted Regression Trees 
+ 
+Boosted regression trees are a method from the decision tree family of statistics, and they are well suited for large and complex ecological datasets; they do not assume normality nor linear relationships between predictor and response variables, they ignore non-informative predictor variables, and they can accept predictors that are numeric, categorical, or binary (Brown et al. 2012; Elith et al. 2008). Boosted regression trees are also unaffected by outliers and effectively handle both missing data and collinearity between predictors (De'ath 2007; Dormann et al. 2013). Importantly, such methods are becoming more common in ecological analyses and have been shown to outperform many traditional statistical methods such as linear regression, generalized linear models, and generalized additive models (Guisan et al. 2007). 
+
+For this analysis, we are using boosted regression trees to identify the covariates that describe the most variation in our response (Bd) or clusters. We are not using this model predictively. For boosted regression trees, we can set a threshold that filters to the top 10 variables, or use a 5% threshold (commonly used with BRTs) and see how many total variables meet this, the only downside is we still may end up with many variables.
+
+## Building BRTs: Field
+
+We do some data wrangling first to make sure things will fit into the BRT modeling framework. Then use the XGB and {`tidymodel`} framework.
+
+### Build Models
+-->
+<!--
+preprocessing `step_*`: 
+
+The preprocessing steps after the recipe has been defined
+
+ - dummy: Also called one-hot encoding
+ - zero variance: Removing columns (or features) with a single unique value
+ - impute: Imputing missing values
+ - decorrelate: Mitigating correlated predictors (e.g., principal component analysis)
+ - normalize: Centering and/or scaling predictors (e.g., log scaling). Scaling matters because many algorithms (e.g., lasso) are scale-variant (except tree-based algorithms). normalization (sensitive to outliers) and standardization (not sensitive to outliers).
+ - transform: Making predictors symmetric
+
+-->
+<!--
+```{r brt-xgb-fld, eval=FALSE, echo=TRUE}
+# note for future tidymodel version: https://bcullen.rbind.io/post/2020-06-02-tidymodels-decision-tree-learning-in-r/
+# nice write up on boosted trees here:
+# https://www.sds.pub/boosted-trees.html & https://www.sds.pub/fitting-boosted-tree-models.html
+# https://juliasilge.com/blog/xgboost-tune-volleyball/
+
+library(tidymodels)
+library(xgboost)
+library(patchwork)
+library(vip)
+
+# first deal with getting just numeric data
+brt_fld <- df_fld %>% st_drop_geometry() %>% 
+  dplyr::select(where(is.numeric), where(is.integer)) %>% 
+  select(-c(starts_with("LOC_"), starts_with("CLU_"), bd_its_copies,
+            Y_ele, X_ele, comid, svl_mm, weight_g, P_VALUE, 
+            bd_load_ze_if_q_pcr, 
+            #drop highly correlated
+            pcpn_noaa, tmin_noaa, capt_mon))
+
+df_fld %>% st_drop_geometry() %>% group_by(life_stage_a_j_m_t, bd_positive) %>% tally()
+df_fld %>% st_drop_geometry() %>%  filter(life_stage_a_j_m_t=="T") %>% select(date_captured, capt_mon) %>% summary()
+
+# drop columns that have more than 70% NAs
+#brt_fld_df <- brt_fld[, which(colMeans(!is.na(brt_fld)) > 0.7)]
+# list columns that were dropped (down to 71)
+#setdiff(names(brt_fld), names(brt_fld_df))
+
+# build dataset and randomize
+brt_fld_df <- brt_fld %>% 
+  # make predictor factor
+  mutate(bd_positive = as.factor(bd_positive)) %>% 
+  as.data.frame
+names(brt_fld_df)
+
+# split the data
+set.seed(123)
+rb_split <- initial_split(brt_fld_df, strata = bd_positive)
+rb_train <- training(rb_split)
+rb_test <- testing(rb_split)
+
+# set up XGB
+xgb_spec <- boost_tree(
+  trees = 1000, 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## model complexity
+  sample_size = tune(), mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+xgb_spec
+
+# build a grid to search over
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), rb_train),
+  learn_rate(),
+  size = 30
+)
+
+# build a model recipe: here just Bd 1 or 0
+xgb_rec <- recipe(bd_positive ~ ., rb_train) %>% 
+  # drop variables with corr > 0.7
+  step_nzv(all_predictors(), freq_cut = 0, unique_cut = 0) %>% # remove variables with zero variances
+  bestNormalize::step_orderNorm(all_numeric_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_corr(all_numeric_predictors(), threshold = 0.7) %>% 
+  prep(verbose=TRUE)
+
+# then build a workflow with recipe (this is setting up model)
+xgb_wf1 <- workflow(xgb_rec, xgb_spec)
+# xgb_wf1
+
+# or build a workflow directly
+# xgb_wf2 <- workflow() %>%
+#   add_formula(bd_positive ~ .) %>%
+#   add_model(xgb_spec)
+# xgb_wf2
+
+# create CV folds (10 fold)
+rb_folds <- vfold_cv(rb_train, strata = bd_positive)
+
+#tuning in parallel
+doParallel::registerDoParallel()
+
+# this takes a few minutes
+set.seed(234)
+xgb_res <- tune_grid(
+  xgb_wf1,
+  resamples = rb_folds,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+# pick best model
+# show_best(xgb_res, "roc_auc")
+best_auc <- select_best(xgb_res, "roc_auc")
+best_auc
+
+# run best model
+final_xgb <- finalize_workflow(
+  xgb_wf1,
+  best_auc
+)
+
+# SAVE
+save(xgb_res, final_xgb, rb_split, rb_train, rb_test, file = here("models/brt_xgboost_field_bd.rda"))
+
+```
+
+### Visualize
+
+```{r brt-xgb-fld-viz, eval=FALSE, warning=FALSE}
+
+library(tidymodels)
+library(xgboost)
+library(patchwork)
+library(vip)
+
+# now explore
+load(here("models/brt_xgboost_field_bd.rda"))
+
+# view metrics
+# collect_metrics(xgb_res)
+
+# check parameters
+# xgb_res %>%
+#   collect_metrics() %>% 
+#   filter(.metric == "roc_auc") %>%
+#   #filter(.metric == "accuracy") %>%
+#   dplyr::select(mean, mtry:sample_size) %>%
+#   pivot_longer(mtry:sample_size,
+#                values_to = "value",
+#                names_to = "parameter"
+#   ) %>%
+#   ggplot(aes(value, mean, color = parameter)) +
+#   geom_point(alpha = 0.8, show.legend = FALSE) +
+#   facet_wrap(~parameter, scales = "free_x") +
+#   labs(x = NULL, y = "ROC")
+
+# view variable importances
+# extract final model fit
+final_xgb_fit <- final_xgb %>% fit(data=rb_train)
+final_xgb_fit %>% 
+  extract_fit_parsnip() %>% vi() %>% 
+  DT::datatable() %>% DT::formatPercentage("Importance", digits=1)
+
+# another way to extract
+#importances <- xgboost::xgb.importance(model = extract_fit_engine(final_xgb_fit))
+
+# plot
+(vi1 <- final_xgb_fit %>% 
+  extract_fit_parsnip() %>% vi() %>% 
+    mutate(Variable = fct_reorder(Variable, Importance)) %>% 
+    dplyr::slice(1:10) %>%
+    ggplot() +
+    geom_vline(xintercept = 0.05, lty=2, col="gray") + 
+    geom_linerange(aes(xmin=0, xmax=Importance, y=Variable), col="steelblue", size=1) +
+    geom_point(aes(x=Importance, y=Variable), col="steelblue", size=4) +
+    cowplot::theme_cowplot(font_family = "Roboto Condensed") +
+    theme(plot.background = element_rect(fill="white")) +
+    labs(x="Relative Importance", y=NULL, subtitle = "Boosted Regression Tree: Field (Bd+)") +
+    scale_x_continuous(labels=scales::percent))
+
+# save: 
+#ggsave(here("figs/modeling_xgb_var_importance_field.png"), width = 11, height = 8.5, dpi=300)
+
+# fit to split
+# final_res <- last_fit(final_xgb, rb_split)
+
+# metrics available
+# collect_metrics(final_res)
+# calc prediction accuracy via ROC
+# final_res %>%
+#   collect_predictions() %>% 
+#   roc_curve(bd_positive, .pred_0) %>%
+#   ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+#   geom_line(size = 1.5, color = "midnightblue") +
+#   geom_abline(
+#     lty = 2, alpha = 0.5,
+#     color = "gray50",
+#     size = 1.2
+#   )
+
+```
+
+
+## Building BRTs: Museum
+
+```{r brt-xgb-mus, eval=FALSE}
+
+# first deal with NAs
+brt_mus <- df_mus %>% st_drop_geometry() %>% 
+  dplyr::select(where(is.numeric), where(is.integer)) %>% 
+  select(-c(starts_with("LOC_"), starts_with("CLU_"), bd_its_copies,
+            Y_ele, X_ele, comid, svl_mm, weight_g, P_VALUE, areaacres,
+            bd_load_ze_if_q_pcr,
+            #drop CLUSTER info since it accounts for SATSCAN variance
+            CLUSTER, clustrate)) # drop cols
+
+names(brt_mus)
+
+# additional variables
+to_drop <- c("DAM_DENSITY_PER_KM_STRM", "NFHP15_HCI_LOCAL_WS",
+             "NRSA_AQUATIC_COND_MEAN", "NRSA_AQUATIC_COND_OUTLET",
+             "STREAMLGTH_SUP_IMP_DIFF_PCTA", "WBAREA_SUP_IMP_DIFF_PCTA",
+             "GAP_PROT_1_2_PCT_WS", "AG_H2O_USE_05_WS", "DOM_H2O_USE_MGD_2005_WS",
+             "IND_H2O_USE_MGD_WS", "MEAN_WILDFIRE_RISK", "HVH_WILDFIRE_RISK_PCT",
+             # and drop capt_yr
+             "capt_yr")
+
+brt_mus <- brt_mus %>% select(-(to_drop))
+
+names(brt_mus)
+summary(brt_mus)
+
+# drop columns that have more than 70% NAs
+brt_mus_df <- brt_mus[, which(colMeans(!is.na(brt_mus)) > 0.7)]
+
+# list columns that were dropped (down to 73)
+setdiff(names(brt_mus), names(brt_mus_df))
+
+# build dataset
+brt_mus_df <- brt_mus_df %>% 
+  # make predictor factor
+  mutate(bd_positive = as.factor(bd_positive)) %>% 
+  as.data.frame
+
+# split the data
+set.seed(123)
+rb_split <- initial_split(brt_mus_df, strata = bd_positive)
+rb_train <- training(rb_split)
+rb_test <- testing(rb_split)
+
+# set up XGB
+xgb_spec <- boost_tree(
+  trees = 1000, 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## first three: model complexity
+  sample_size = tune(), mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+xgb_spec
+
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), rb_train),
+  learn_rate(),
+  size = 30
+)
+
+# build a recipe
+xgb_rec <- recipe(bd_positive ~ ., rb_train) %>% 
+  step_corr(all_numeric_predictors(), threshold = 0.7)
+
+# then build a workflow with recipe
+xgb_wf1 <- workflow(xgb_rec, xgb_spec)
+#xgb_wf1
+
+# create CV folds (10 fold)
+rb_folds <- vfold_cv(rb_train, strata = bd_positive)
+
+#tuning
+doParallel::registerDoParallel()
+
+set.seed(234)
+xgb_res <- tune_grid(
+  xgb_wf1,
+  resamples = rb_folds,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+# pick best model
+#show_best(xgb_res, "roc_auc")
+best_auc <- select_best(xgb_res, "roc_auc")
+#best_auc
+
+# run best model
+final_xgb <- finalize_workflow(
+  xgb_wf1,
+  best_auc
+)
+
+# SAVE
+save(xgb_res, final_xgb, rb_split, rb_train, rb_test, file = here("models/brt_xgboost_museum_bd.rda"))
+
+```
+
+### Visualize
+
+```{r brt-xgb-mus-viz, eval=FALSE, message=FALSE, warning=FALSE}
+
+# load
+load(here("models/brt_xgboost_museum_bd.rda"))
+
+# extract final model fit
+final_xgb_fit <- final_xgb %>% fit(data=rb_train)
+final_xgb_fit %>% 
+  extract_fit_parsnip() %>% vi() %>% 
+  DT::datatable() %>% DT::formatPercentage("Importance", digits=1)
+
+# another way to extract
+#importances <- xgboost::xgb.importance(model = extract_fit_engine(final_xgb_fit))
+
+# plot
+(vi1 <- final_xgb_fit %>% 
+  extract_fit_parsnip() %>% vi() %>% 
+    mutate(Variable = fct_reorder(Variable, Importance)) %>% 
+    dplyr::slice(1:10) %>%
+    ggplot() +
+    geom_vline(xintercept = 0.05, lty=2, col="gray") + 
+    geom_linerange(aes(xmin=0, xmax=Importance, y=Variable), col="steelblue", size=1) +
+    geom_point(aes(x=Importance, y=Variable), col="steelblue", size=4) +
+    cowplot::theme_cowplot(font_family = "Roboto Condensed") +
+    theme(plot.background = element_rect(fill="white")) +
+    labs(x="Relative Importance", y=NULL, subtitle = "Boosted Regression Tree: Museum (Bd+)") +
+    scale_x_continuous(labels=scales::percent))
+
+
+# save: 
+#ggsave(here("figs/modeling_xgb_var_importance_museum.png"), width = 11, height = 8.5, dpi=300)
+
+# fit to split
+# final_res <- last_fit(final_xgb, rb_split)
+
+# metrics available
+#collect_metrics(final_res)
+
+# calc prediction accuracy via ROC
+# final_res %>%
+#   collect_predictions() %>% 
+#   roc_curve(bd_positive, .pred_0) %>%
+#   ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+#   geom_line(size = 1.5, color = "midnightblue") +
+#   geom_abline(
+#     lty = 2, alpha = 0.5,
+#     color = "gray50",
+#     size = 1.2
+#   )
+
+```
+
+-->
+
+# Summary
+
+To summarize, the top variables based on each dataset:
+
+**Field** top variables were:
+ 
+  - *day length*
+  - *tmax_noaa*
+  - *PHDI* (Palmer Hydrologic Drought Index: takes into account longer-term dryness that will affect water storage, streamflow, and groundwater)
+  - *elevation*
+  - *SPEI*
+  - *latitude*
+  
+**Museum** top variables were:
+ 
+  - *SPEI* (Standardized Precipitation Evapotranspiration Index, uses both precip and potential ET to evaluate drought, and captures the main impact of increased temperatures on water demand) 
+  - *DA Symmetric Population_Density_WS* (pop density in the land area of HUC12, based on 2015 census)
+  - *N_INDEX2_CDLNLCD11_PCT_HAZ* (Percent of the HUC12 that is in the Hydrologically Active Zone (HAZ) and classified as natural land cover (excluding barren land) by the 2011 CDL-NLCD Hybrid Land Cover dataset)
+  - *latitude*
+  - *day length*
+  - *Crop MH Urban Percent RZ* (% of HUC12 that is in the riparian zone and classified as high-intensity land cover [cultivated crops, medium and high density urban]).
+
+Overall, drought and seasonality/drought seems to be a strong factor in the Field dataset, while drought and watershed change (hydrologically active nat land cover, population density, etc) seem to be strongest in the museum dataset.
+
+If we make a PCA of just these variables and look at loading plot to see how they fall out:
+
+### Field
+
+```{r pca2-field, echo=TRUE, layout="l-page"}
+
+library(factoextra) # clustering visualization/stats
+library(cowplot)
+library(ggthemes)
+library(broom)
+library(purrr)
+
+# drop geometry, pull only numeric/integer data, and drop other noninfo cols
+pca_fld <- df_fld %>% st_drop_geometry() %>% 
+  filter(!is.na(elevation)) %>% 
+  select(where(is.numeric), where(is.integer)) %>% 
+  # drop variables with NAs
+  select_if(~!any(is.na(.))) %>% 
+  # drop additional variables
+  select(daylen_hr, tmax_noaa, phdi_noaa, elevation, spei12, spei24, latitude_dd) %>% 
+  scale() %>% # scale the data
+  prcomp() # pca
+
+# set arrow style
+arrow_style <- arrow(
+  angle = 15, length = grid::unit(3, "pt"),
+  ends = "first", type = "closed"
+)
+
+# extract rotation matrix
+pca_fld_rot <- pca_fld %>% 
+  tidy(matrix = "rotation") %>%
+  pivot_wider(
+    names_from = "PC", values_from = "value",
+    names_prefix = "PC")
+
+# plot
+ggplot(data=pca_fld_rot, aes(x=PC1, y=PC2, label=column)) +
+  geom_segment(
+    xend = 0, yend = 0,
+    arrow = arrow_style
+  ) +
+  ggrepel::geom_text_repel(data=pca_fld_rot, aes(label=column),
+                          #max.overlaps = 14, 
+                          size=3.5,
+                          family="Roboto Condensed") +
+  xlim(c(-0.5, 1)) +
+  theme_minimal_grid() +
+  coord_fixed() +
+  labs(title="Rotation Matrix: Field Bd 1/0")
+
+```
+
+
+
+### Museum
+
+```{r pca2-mus, echo=TRUE, layout="l-page"}
+
+library(factoextra) # clustering visualization/stats
+library(cowplot)
+library(ggthemes)
+library(broom)
+library(purrr)
+
+# drop geometry, pull only numeric/integer data, and drop other noninfo cols
+pca_mus <- df_mus %>% st_drop_geometry() %>% 
+  #filter(!is.na(elevation)) %>% 
+  select(where(is.numeric), where(is.integer)) %>% 
+  # drop variables with NAs
+  select_if(~!any(is.na(.))) %>% 
+  # drop additional variables
+  select(DASYMETRIC_POPULATION_DEN_WS, spei12, spei24, latitude_dd, N_INDEX2_CDLNLCD11_PCT_HAZ,
+         daylen_hr, ICLUS_IC_DIFF_PCT) %>% 
+  # crop: Percent of the HUC12 that is in the Riparian Zone and classified as high-intensity land cover 
+  # iclus: The projected change in the percentage of impervious surface cover in the HUC12 from 2010 to 2050
+  scale() %>% # scale the data
+  prcomp() # pca
+
+# set arrow style
+arrow_style <- arrow(
+  angle = 15, length = grid::unit(3, "pt"),
+  ends = "first", type = "closed"
+)
+
+# extract rotation matrix
+pca_mus_rot <- pca_mus %>% 
+  tidy(matrix = "rotation") %>%
+  pivot_wider(
+    names_from = "PC", values_from = "value",
+    names_prefix = "PC")
+
+# plot
+ggplot(data=pca_mus_rot, aes(x=PC1, y=PC2, label=column)) +
+  geom_segment(
+    xend = 0, yend = 0,
+    arrow = arrow_style
+  ) +
+  ggrepel::geom_text_repel(data=pca_mus_rot, aes(label=column),
+                          max.overlaps = 14, size=3.5,
+                          family="Roboto Condensed") +
+  #xlim(c(-0.4, 0.4)) +
+  theme_minimal_grid() +
+  coord_fixed() +
+  labs(title="Rotation Matrix: Museum Bd 1/0")
+
+
+```
+
+
+
+
+

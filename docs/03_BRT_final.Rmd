@@ -1,0 +1,537 @@
+---
+title: "Covariate Correlations and Reduction"
+description: |
+  Using BRTs to identify covariates (updated `r Sys.Date()`)
+output: 
+  distill::distill_article:
+    code_folding: true
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  comment = NA,
+  R.options = list(width = 70)
+)
+library(here)
+library(knitr)
+library(glue)
+#source(here("scripts","functions.R"))
+
+```
+
+# Approach
+
+To better understand drivers of variation in Bd across time and space, we need to figure out which covariates describe the most variation in our dataset. Using the large list of environmental, climatic, and life-history covariates, we can use several different approaches to identify which variables have the greatest importance or influence on variation in our dataset. We can use a boosted regression trees (BRT) approach to determine variable importance across all data, and for each individual spatial clusters identified in the SatScan analysis.
+
+## Map Of Trends Through Time
+
+Here we look at positives through time, where the filled points are Bd+, and hollow gray are Bd-. There is a strong trend in the museum data along a latitudinal gradient, and little or no trend in the field based data.
+
+```{r figh12time, echo=FALSE, layout="l-page", out.height='100%', fig.cap='Year by latitude Bd all samples'}
+
+include_graphics(here("figs/year_by_lat_for_museum_v_field_all_samples_wR2_all_w_map.png"))
+
+
+```
+
+## Join SatScan Clusters
+
+We need to join the spatial cluster information to our data. We filtered out all tadpoles from the data. Here we create a `clustrate` column which is based on each cluster risk ratio:
+
+-   0: no cluster
+-   1: low rate (risk ratio \< 1)
+-   2: hi rate (risk ratio \> 1)
+
+We use the 7 clusters identified for field data (2 low rate, 5 high rate), and the 2 clusters identified for the museum data plus one non-significant (statistically) cluster that is located in the San Gabriel River watershed, all were high rate.
+
+```{r importSATScanData, echo=TRUE}
+
+library(tidyverse)
+library(sf)
+
+# base data set:
+rb_covar <- read_rds(here("output/10a_rb_bd_all_covars_recap_filt.rds"))
+
+# how many?
+table(rb_covar$life_stage_a_j_m_t, useNA = "ifany")
+
+# MUSEUM
+rb_mus <- rb_covar %>%
+  mutate( sampleid2 = janitor::make_clean_names(sampleid), .after=sampleid) %>%
+  filter(field_or_museum=="Museum") %>% #n=461
+  st_as_sf(coords=c("longitude_dd", "latitude_dd"), crs=4269, remove=FALSE)
+
+rb_fld <- rb_covar %>%
+  mutate( sampleid2 = janitor::make_clean_names(sampleid), .after=sampleid) %>%
+  filter(field_or_museum=="Field") %>% # n=1635
+  # drop tadpoles
+  dplyr::filter(life_stage_a_j_m_t %in% 
+                  c("A","J","J/A", NA)) %>% # n=1573
+  st_as_sf(coords=c("longitude_dd", "latitude_dd"), 
+           crs=4269, remove=FALSE) #n=1635
+
+# FIELD MODELS
+modrun <- "rb_bd_bern_h12_field_50p_50k_10min"
+moddir <- "output/satscan/20220817"
+
+fld_pts <- st_read(here(glue("{moddir}/{modrun}.gis.shp")), quiet = TRUE) %>% 
+  filter(P_VALUE<0.05)
+fld_col <- st_read(here(glue("{moddir}/{modrun}.col.shp")), quiet = TRUE)
+
+# need to assign to data?
+# first we filter to sig clusters (p<0.05) then join to give membership
+df_fld <- left_join(rb_fld, st_drop_geometry(fld_pts), 
+                    by = c("huc12"="LOC_ID")) %>% 
+  select(sampleid:boylii_clade,CLUSTER:CLU_POP, everything()) %>% 
+  mutate(CLUSTER = case_when(
+    is.na(CLUSTER) ~ 0, # not part of a cluster
+    TRUE ~ CLUSTER)) %>% 
+  mutate(clustrate = case_when(
+    CLUSTER==0 ~ 0,
+    CLU_RR < 1 ~ 1, # low rate cluster
+    CLU_RR >=1 ~ 2 # high rate cluster
+  ), .after=bd_positive) %>% 
+# reorder clusters north to south
+  mutate(CLUSTER = case_when(
+    CLUSTER == 2 ~ 7,
+    CLUSTER == 3 ~ 6,
+    CLUSTER == 7 ~ 4,
+    CLUSTER == 4 ~ 3,
+    CLUSTER == 1 ~ 2, 
+    CLUSTER == 6 ~ 1,
+    TRUE ~ CLUSTER))
+
+mapview::mapview(df_fld %>% filter(CLUSTER!=0), zcol="CLUSTER", layer.name="Cluster") +
+  mapview::mapview(df_fld %>% filter(CLUSTER==0), col.regions="gray", layer.name="Non-Cluster", cex=3)
+table(df_fld$CLUSTER, useNA="always")
+
+# MUSEUM MODELS
+modrun <- "rb_bd_bern_h12_museum_50p_50k_3min"
+moddir <- "output/satscan/20210907"
+
+# don't filter to p<0.05 here, want to include san gabriel cluster
+mus_pts <- st_read(here(glue("{moddir}/{modrun}.gis.shp")), quiet = TRUE)
+mus_col <- st_read(here(glue("{moddir}/{modrun}.col.shp")), quiet = TRUE)
+
+# join to give membership
+df_mus <- left_join(rb_mus, st_drop_geometry(mus_pts), by = c("huc12"="LOC_ID")) %>% 
+  select(sampleid:boylii_clade,CLUSTER:CLU_POP, everything()) %>% 
+  mutate(CLUSTER = case_when(
+    is.na(CLUSTER) ~ 0, # NOT PART OF A CLUSTER
+    TRUE ~ CLUSTER)) %>% 
+  mutate(clustrate = case_when(
+    CLUSTER==0 ~ 0,
+    CLU_RR < 1 ~ 1,
+    CLU_RR >=1 ~ 2
+  ), .after=bd_positive)
+
+# table(df_mus$CLUSTER, useNA="always")
+# table(df_mus$clustrate, useNA="always")
+table(df_mus$life_stage_a_j_m_t, useNA = "always")
+
+```
+
+## Look at Years Ranges per Cluster
+
+```{r boxplots}
+
+# museum cluster by year
+ggplot() + geom_boxplot(data=df_mus, aes(y=capt_yr, fill=as.factor(bd_positive), group=bd_positive), show.legend = TRUE, alpha=0.5) +
+  facet_grid(~CLUSTER) +
+  theme_classic() +
+  ggthemes::scale_fill_colorblind("Bd+") +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank())+
+  labs(y="Year Sampled", 
+       title="Museum Samples by Cluster",
+       caption="Clusters North to South, 0 = no cluster")
+#ggsave(filename = "figs/museum_samples_by_cluster_years_boxplot.png",
+#      width = 10, height = 8, dpi=300)
+
+ggplot() + geom_boxplot(data=df_fld, aes(y=capt_yr, fill=as.factor(bd_positive), group=bd_positive), show.legend = TRUE, alpha=0.5) +
+  facet_grid(~CLUSTER) +
+  theme_classic() +
+  ggthemes::scale_fill_colorblind("Bd+") +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank())+
+  labs(y="Year Sampled", 
+       title="Field Samples by Cluster",
+       caption="Clusters North to South, 0 = no cluster")
+#ggsave(filename = "figs/field_samples_by_cluster_years_boxplot.png",
+#       width = 10, height = 8, dpi=300)
+
+
+```
+
+# Correlation
+
+We used a correlation analysis (Pearson) to assess which variables were correlated across each of the Field and Museum datasets. We dropped observations that contained `NA`, and filtered to just numeric data before creating a correlation table.
+
+## Field Data
+
+Look at Pearson correlations for field data.
+
+<aside>Note, `elevation` is the adjusted (snapped point to nearest streamline) elevation for sampling location.</aside>
+
+```{r corr-field, echo=TRUE}
+
+library(corrr)
+# drop geometry, pull only numeric/integer data, and drop other noninfo cols
+corr_fld <- df_fld %>% st_drop_geometry() %>% 
+  select(where(is.numeric), where(is.integer)) %>%
+  # drop additional variables that are duplicative
+  select(-c(CLIMDIV, areaacres, comid, P_VALUE, X_ele, Y_ele,
+            regulation_0_unreg_1_upstream_dam_2_downstream_dam,
+            starts_with("bd_"),
+            starts_with("LOC_"),
+            starts_with("CLU_"),
+            clustrate, CLUSTER)) %>% 
+  # filter out rows that contain NAs (if only a few ~n=6)
+  filter(!is.na(elevation),
+         !is.na(NRSA_AQUATIC_COND_MEAN)) %>% # n=1492, 52 vars
+  # drop remaining variables that have NAs
+  select_if(~!any(is.na(.))) %>% # n=1492, 46 vars
+  correlate()
+
+# order and plot by correlation:
+corr_fld  %>% 
+  rearrange(absolute = FALSE) %>% # order by corr
+  shave() %>% # take lower triangle only
+  rplot() +
+  theme(axis.text.x = element_text(angle=70, 
+                                   family="Roboto Condensed", 
+                                   size = 7),
+        axis.text.y = element_text(family="Roboto Condensed", 
+                                   size = 7)
+  )
+
+# stretch
+corr_fld %>%
+  rearrange() %>%
+  shave() %>% 
+  stretch(na.rm = TRUE) %>% 
+  #write_csv(file="output/field_covariate_correlations.csv")
+  DT::datatable()
+
+
+```
+
+## Museum Data
+
+Look at Pearson correlations for museum data.
+
+```{r corr-mus, echo=TRUE}
+
+library(corrr)
+
+## drop geometry, pull only numeric/integer data, and drop other noninfo cols
+corr_mus <- df_mus %>% st_drop_geometry() %>% 
+  select(where(is.numeric), where(is.integer)) %>%
+  # drop additional variables that are duplicative
+  select(-c(CLIMDIV, areaacres, comid, P_VALUE, X_ele, Y_ele,
+            regulation_0_unreg_1_upstream_dam_2_downstream_dam,
+            starts_with("bd_"),
+            starts_with("LOC_"),
+            starts_with("CLU_"),
+            clustrate, CLUSTER)) %>% 
+  # filter out rows that contain NAs (if only a few ~n=6)
+  filter(!is.na(elevation),
+         !is.na(NRSA_AQUATIC_COND_MEAN)) %>% 
+  # drop remaining variables that have NAs
+  select_if(~!any(is.na(.))) %>% # n=389
+  correlate()
+
+corr_mus  %>% 
+  rearrange(absolute = FALSE) %>% # order by corr
+  shave() %>% # take lower triangle only
+  rplot() +
+  theme(axis.text.x = element_text(angle=70, 
+                                   family="Roboto Condensed", 
+                                   size = 7),
+        axis.text.y = element_text(family="Roboto Condensed", 
+                                   size = 7)
+  )
+
+# stretch
+corr_mus %>%
+  rearrange() %>%
+  shave() %>% 
+  stretch(na.rm = TRUE) %>% 
+  #write_csv(file="output/museum_covariate_correlations.csv")
+  DT::datatable()
+
+```
+
+# Boosted Regression Trees
+
+Boosted regression trees are a method from the decision tree family of statistics, and they are well suited for large and complex ecological datasets; they do not assume normality nor linear relationships between predictor and response variables, they ignore non-informative predictor variables, and they can accept predictors that are numeric, categorical, or binary (Brown et al. 2012; Elith et al. 2008). Boosted regression trees are also unaffected by outliers and effectively handle both missing data and collinearity between predictors (De'ath 2007; Dormann et al. 2013). Importantly, such methods are becoming more common in ecological analyses and have been shown to outperform many traditional statistical methods such as linear regression, generalized linear models, and generalized additive models (Guisan et al. 2007).
+
+For this analysis, we are using boosted regression trees to identify the covariates that describe the most variation in our response (Bd) or clusters. We are not using this model predictively. For boosted regression trees, we can set a threshold that filters to the top 10 variables, or use a 5% threshold (commonly used with BRTs) and see how many total variables meet this, the only downside is we still may end up with many variables.
+
+## Building BRTs: Field
+
+We do some data wrangling first to make sure things will fit into the BRT modeling framework. Then use the XGB and {`tidymodel`} framework. We dropped tadpoles from the modeling as the majority are `Bd=0`, and comparisons between Field and Museum datasets are more equitable. For the field data, there were 111 total tadpoles, of which 107 were Bd=0, and data spanned months from May through Sept.
+
+### Build Models
+
+To build models, we needed to clean the data. For **Field** datasets, we removed life stage, cluster, and Bd information, as well as `capt_mon`, `longitude`, `spei12`, `pcpn_noaa`, `pdsi_noaa`, `pmdi_noaa`, `phdi_noaa` and `tmin_noaa` because these variables were highly correlated with other representative variables of temperature or seasonality.
+
+We then modeled Bd=1 or Bd=0 as our response factor, and split data into training and testing, using 10-fold cross validation.
+
+```{r brt-xgb-fld, eval=FALSE, echo=TRUE}
+
+library(tidymodels)
+library(xgboost)
+library(patchwork)
+library(vip)
+
+# first deal with getting just numeric data
+brt_fld <- df_fld %>% st_drop_geometry() %>% 
+  dplyr::select(where(is.numeric), where(is.integer)) %>% 
+  select(-c(starts_with("LOC_"), 
+            starts_with("CLU_"), 
+            bd_its_copies,areaacres, CLIMDIV,
+            Y_ele, X_ele, comid, svl_mm, weight_g, P_VALUE, 
+            bd_load_ze_if_q_pcr, clustrate, CLUSTER,
+            #drop highly correlated
+            longitude_dd, spei12,
+            pcpn_noaa, tmin_noaa, tmpc_noaa,
+            phdi_noaa, pmdi_noaa, pdsi_noaa, 
+            capt_mon))
+
+names(brt_fld)
+
+# build dataset and randomize
+brt_fld_df <- brt_fld %>% 
+  # make predictor factor
+  mutate(bd_positive = as.factor(bd_positive)) %>% 
+  as.data.frame
+
+names(brt_fld_df)
+
+# split the data (default takes 75% for training)
+set.seed(123)
+rb_split <- initial_split(brt_fld_df, strata = bd_positive)
+rb_train <- training(rb_split)
+rb_test <- testing(rb_split)
+
+## MODEL SPECIFICATIONS & PARAMETERS ----------------
+
+# set up XGB
+xgb_spec <- boost_tree(
+  trees = tune(), 
+  tree_depth = tune(), 
+  min_n = tune(), 
+  loss_reduction = tune(),                     ## model complexity
+  sample_size = tune(), mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+# build a grid to search over
+xgb_grid <- grid_latin_hypercube(
+  trees(range = c(500L,5000L)),
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), rb_train),
+  learn_rate(),
+  size = 30
+)
+
+
+## MODEL RECIPE -----------
+
+# build a model recipe: here just Bd 1 or 0
+xgb_rec <- recipe(bd_positive ~ ., rb_train) %>% 
+  step_nzv(all_predictors(), freq_cut = 0, unique_cut = 0) %>% 
+  # remove variables with zero variances
+  bestNormalize::step_orderNorm(all_numeric_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  # drop variables with corr > 0.7
+  #step_corr(all_numeric_predictors(), threshold = 0.7) %>% 
+  prep(verbose=TRUE)
+
+## MODEL WORKFLOW (SETTING TO RUN) ------------
+
+# then build a workflow with recipe (this is setting up model)
+xgb_wf1 <- workflow(xgb_rec, xgb_spec)
+
+# create CV folds (10 fold)
+rb_folds <- vfold_cv(rb_train, strata = bd_positive)
+
+## MODEL RUN & GRIDSEARCH ---------------------
+
+#tuning in parallel
+doParallel::registerDoParallel()
+
+# this takes a few minutes
+set.seed(234)
+xgb_res <- tune_grid(
+  xgb_wf1,
+  resamples = rb_folds,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+beepr::beep()
+
+## RUN BEST MODEL --------------
+# pick best model
+best_auc <- select_best(xgb_res, "roc_auc")
+best_auc
+
+# run best model
+final_xgb <- finalize_workflow(
+  xgb_wf1,
+  best_auc
+)
+
+# SAVE
+save(xgb_res, final_xgb, rb_split, rb_train, rb_test, 
+     file = here("models/brt_xgboost_field_bd.rda"))
+
+```
+
+### Visualize
+
+```{r brt-xgb-fld-viz, eval=TRUE, warning=FALSE, echo=TRUE}
+
+library(tidymodels)
+library(xgboost)
+library(patchwork)
+library(vip)
+
+# now explore
+load(here("models/brt_xgboost_field_bd.rda"))
+
+# extract final model fit
+final_xgb_fit <- final_xgb %>% fit(data=rb_train)
+final_xgb_fit %>% 
+  extract_fit_parsnip() %>% vi() %>% 
+  DT::datatable() %>% DT::formatPercentage("Importance", digits=1)
+
+# another way to extract
+#importances <- xgboost::xgb.importance(model = extract_fit_engine(final_xgb_fit))
+
+# plot
+# make a version with better names?
+vi_final <- final_xgb_fit %>% 
+  extract_fit_parsnip() %>% vi() %>% 
+  mutate(Variable = fct_reorder(Variable, Importance)) %>% 
+  dplyr::slice(1:8) %>% 
+  # fix names
+  mutate(Variable = case_when(
+    grepl("tmax_noaa", Variable) ~ "Max. Temperature",
+    grepl("latitude_dd", Variable) ~ "Latitude",
+    grepl("daylen_hr", Variable) ~ "Daylength",
+    grepl("AG_HYDRIC_PCT_WS", Variable) ~ "% Agriculture on Hydric Soil",
+    grepl("PCT_WETLANDS_REMAINING", Variable) ~ "% Wetlands Remaining",
+    grepl("spei24", Variable) ~ "SPEI 24 month",
+    grepl("elevation", Variable) ~ "Elevation",
+    grepl("capt_yr", Variable) ~ "Capture Year")) %>% 
+    #grepl("spei12", Variable) ~ "SPEI 12 month",
+    #grepl("longitude_dd", Variable) ~ "Longitude",
+    #grepl("NRSA_AQUATIC_COND_MEAN", Variable) ~ "Prob of Good Biological Condition",
+    #grepl("PCT_IMPERVIOUSNESS2011_MEAN_WS", Variable) ~ "% Impervious Surface",
+    #grepl("ROADS_ALL_DENSITY_2014_RZ", Variable) ~ "Road Density in Riparian Zone",
+    #grepl("areasqkm", Variable) ~ "Watershed Area (HUC12)",
+    #grepl("PCT_FOREST_REMAIN", Variable) ~ "% Forest Remaining")) %>% 
+  mutate(Variable = fct_reorder(Variable, Importance))
+  
+# write_csv(vi_final, file = "models/brt_field_vi_top_10.csv")
+
+vi_final %>% 
+  ggplot() +
+  geom_vline(xintercept = 0.05, lty=2, col="gray") + 
+  geom_linerange(aes(xmin=0, xmax=Importance, y=Variable), col="steelblue", size=1) +
+  geom_point(aes(x=Importance, y=forcats::fct_reorder(Variable, Importance)), col="steelblue", size=4) +
+  cowplot::theme_cowplot(font_family = "Roboto Condensed") +
+  theme(plot.background = element_rect(fill="white")) +
+  labs(x="Relative Importance", y=NULL, subtitle = "Boosted Regression Tree: Field (Bd+)") +
+  scale_x_continuous(labels=scales::percent)
+
+# save: 
+ggsave(here("figs/modeling_xgb_var_importance_field.png"), width = 7, height = 4.5, dpi=300)
+
+```
+
+# Summary
+
+To summarize, the top variables based on each dataset:
+
+**Field** top variables were:
+
+ -  *Max Air Temp (tmax_noaa)*
+ -  *Latitude*
+ -  *Day length*
+ -  *%Agriculture on Hydric Soil* Percent of the HUC12 with agriculture on hydric soils. Calculated by overlaying soils units with ≥ 80% hydric soils from the SSURGO data with agricultural land cover classes from a custom land cover dataset that combined the 2006 National Land Cover Database (NLCD 2006) and the 2010 USDA Cropland Data Layer (CDL). Because SSURGO classifies map units as "percent hydric" rather than hydric or non-hydric, a minimum threshold of 80% hydric soils per map unit was used to distinguish hydric soils from non-hydric soils. Equation used: `Area of Agriculture on Hydric Soils / HUC12 Area * 100`.
+ - *%Wetlands remaining* Percent of wetland cover remaining relative to pre-development wetland cover in the HUC12. Source data were the Existing Vegetation Type (EVT) geospatial grid dataset (March 2013 version) and the Environmental Site Potential (ESP) geospatial grid dataset (January 2010 version) from the Landscape Fire and Resource Management Planning Tools (LANDFIRE) program (http://www.landfire.gov/viewer/). The EVT grid classifies existing vegetative cover across the US at 30-meter resolution. The ESP grid classifies the climax vegetative cover that could be supported at a given site in the absence of human development at 30-meter resolution. Vegetation classes in the EVT grid were generalized to "Wetland" or "Non-Wetland" based on descriptive attributes to calculate the area of remaining wetland cover in the HUC12. Vegetation classes in the ESP grid were generalized to "Wetland" or "Non-Wetland" based on descriptive attributes to calculate the area of pre-development wetland cover in the HUC12. Equation used: Existing Wetland Area in HUC12 / Pre-Development Wetland Area in HUC12 * 100. Only calculated for HUC12s with pre-development wetland area greater than or equal to 1% of HUC12 area.
+ -  *SPEI 24 month* (Standardized Precipitation Evapotranspiration Index, uses both precip and potential ET to evaluate drought, and captures the main impact of increased temperatures on water demand)
+-   *Elevation*
+
+Overall, temperature, daylength, development or urbanization (via wetland percent and agriculture shift), drought and seasonality seem to be strong factors in the Field dataset.
+
+If we make a PCA of just these variables and look at loading plot to see how they fall out:
+
+### Field
+
+```{r pca2-field, echo=TRUE, layout="l-page"}
+
+library(factoextra) # clustering visualization/stats
+library(cowplot)
+library(ggthemes)
+library(broom)
+library(purrr)
+
+# drop geometry, pull only numeric/integer data, and drop other noninfo cols
+pca_fld <- df_fld %>% st_drop_geometry() %>% 
+  # drop additional variables
+  select(daylen_hr, AG_HYDRIC_PCT_WS, PCT_WETLANDS_REMAINING,
+         tmax_noaa, capt_yr,  
+         elevation, latitude_dd, spei24) %>%  
+  filter(!is.na(elevation),
+         !is.na(AG_HYDRIC_PCT_WS)) %>% 
+  select(where(is.numeric), where(is.integer)) %>% 
+  # drop variables with NAs
+  select_if(~!any(is.na(.))) %>% 
+  scale() %>% # scale the data
+  prcomp() # pca
+
+# set arrow style
+arrow_style <- arrow(
+  angle = 15, length = grid::unit(3, "pt"),
+  ends = "first", type = "closed"
+)
+
+# extract rotation matrix
+pca_fld_rot <- pca_fld %>% 
+  tidy(matrix = "rotation") %>%
+  pivot_wider(
+    names_from = "PC", values_from = "value",
+    names_prefix = "PC")
+
+# plot
+ggplot(data=pca_fld_rot, aes(x=PC1, y=PC2, label=column)) +
+  geom_segment(
+    xend = 0, yend = 0,
+    arrow = arrow_style
+  ) +
+  ggrepel::geom_text_repel(data=pca_fld_rot, aes(label=column),
+                          #max.overlaps = 14, 
+                          size=3.5,
+                          family="Roboto Condensed") +
+  xlim(c(-1, 0.5)) +
+  theme_minimal_grid() +
+  coord_fixed() +
+  labs(title="Rotation Matrix: Field Bd 1/0")
+
+```

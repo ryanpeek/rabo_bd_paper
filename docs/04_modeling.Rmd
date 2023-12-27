@@ -1,0 +1,1217 @@
+---
+title: "Modeling"
+description: |
+  Models (updated `r Sys.Date()`)
+output: 
+  distill::distill_article:
+    code_folding: true
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(here)
+library(knitr)
+library(glue)
+#source(here("scripts","functions.R"))
+
+# load library
+library(glmmTMB)
+library(DHARMa) # for evaluating
+library(sjPlot) # for plotting
+library(ggeffects)
+library(patchwork)
+
+```
+
+# Modeling Approach
+
+To better understand drivers of variation in Bd across time and space, we need to figure out which variables describe the most variation in our dataset. Using the large list of covariates, we will use a PCA and boosted regression tree approach to determine variable importance against the spatial clusters identified in SatScan.
+
+## Join SatScan Clusters to Dataset
+
+We need to join the cluster information to our data. Here we create a `clustrate` column which is based on the cluster risk ratio:
+
+ - 0: no cluster 
+ - 1: low rate (risk ratio < 1)
+ - 2: hi rate (risk ratio > 1)
+
+We use the 7 clusters identified for field data (2 low rate, 5 high rate), and the 2 clusters identified for the museum data plus one non-significant (statistically) cluster that is located in the San Gabriel River watershed.
+
+
+```{r get-data, echo=FALSE}
+
+library(tidyverse)
+library(sf)
+
+# base data set:
+rb_covar <- read_rds(here("output", "10a_rb_bd_all_covars_recap_filt.rds")) 
+
+# museum data
+rb_mus <- rb_covar %>%
+  mutate( sampleid2 = janitor::make_clean_names(sampleid), .after=sampleid) %>%
+  filter(field_or_museum=="Museum") %>% #n=461
+  st_as_sf(coords=c("longitude_dd", "latitude_dd"), crs=4269, remove=FALSE)
+
+# field data
+rb_fld <- rb_covar %>%
+  mutate( sampleid2 = janitor::make_clean_names(sampleid), .after=sampleid) %>%
+  filter(field_or_museum=="Field") %>% # n=1635
+  # drop tadpoles
+  dplyr::filter(life_stage_a_j_m_t %in% 
+                  c("A","J","J/A", NA)) %>% # n=1524
+  st_as_sf(coords=c("longitude_dd", "latitude_dd"), crs=4269, remove=FALSE) #n=1635
+
+# FIELD MODELS
+modrun <- "rb_bd_bern_h12_field_50p_50k_10min"
+moddir <- "output/satscan/20220817"
+
+fld_pts <- st_read(here(glue("{moddir}/{modrun}.gis.shp")), quiet = TRUE) %>% 
+  filter(P_VALUE<0.05)
+fld_col <- st_read(here(glue("{moddir}/{modrun}.col.shp")), quiet = TRUE)
+
+# need to assign to data?
+# first we filter to sig clusters (p<0.05) then join to give membership
+df_fld <- left_join(rb_fld, st_drop_geometry(fld_pts), 
+                    by = c("huc12"="LOC_ID")) %>% 
+  select(sampleid:boylii_clade,CLUSTER:CLU_POP, everything()) %>% 
+  mutate(CLUSTER = case_when(
+    is.na(CLUSTER) ~ 0, # not part of a cluster
+    TRUE ~ CLUSTER)) %>% 
+  mutate(clustrate = case_when(
+    CLUSTER==0 ~ 0,
+    CLU_RR < 1 ~ 1, # low rate cluster
+    CLU_RR >=1 ~ 2 # high rate cluster
+  ), .after=bd_positive) %>% 
+# reorder clusters north to south
+  mutate(CLUSTER = case_when(
+    CLUSTER == 2 ~ 7,
+    CLUSTER == 3 ~ 6,
+    CLUSTER == 7 ~ 4,
+    CLUSTER == 4 ~ 3,
+    CLUSTER == 1 ~ 2, 
+    CLUSTER == 6 ~ 1,
+    TRUE ~ CLUSTER))
+
+# mapview::mapview(df_fld, zcol="CLUSTER")
+# table(df_fld$CLUSTER, useNA="always")
+
+# MUSEUM MODELS
+modrun <- "rb_bd_bern_h12_museum_50p_50k_3min"
+moddir <- "output/satscan/20210907"
+
+# don't filter to p<0.05 here, want to include san gabriel cluster
+mus_pts <- st_read(here(glue("{moddir}/{modrun}.gis.shp")), quiet = TRUE)
+mus_col <- st_read(here(glue("{moddir}/{modrun}.col.shp")), quiet = TRUE)
+
+# join to give membership
+df_mus <- left_join(rb_mus, st_drop_geometry(mus_pts), by = c("huc12"="LOC_ID")) %>% 
+  select(sampleid:boylii_clade,CLUSTER:CLU_POP, everything()) %>% 
+  mutate(CLUSTER = case_when(
+    is.na(CLUSTER) ~ 0, # NOT PART OF A CLUSTER
+    TRUE ~ CLUSTER)) %>% 
+  mutate(clustrate = case_when(
+    CLUSTER==0 ~ 0,
+    CLU_RR < 1 ~ 1,
+    CLU_RR >=1 ~ 2
+  ), .after=bd_positive)
+
+#table(df_mus$CLUSTER, useNA="always")
+#table(df_mus$clustrate, useNA="always")
+
+```
+
+# Field Binomial Models
+
+For the models:
+
+ - CLUSTER RATE (lo/hi) as grouping factors (0: no cluster, 1: low rate, 2: hi rate)
+ - CLUSTER id is a grouping factor
+ - For the ITS model, we want to include only the positive values and retain bernoulli cluster membership.
+
+Build models, compare with AIC/BIC to select best models, and plot predicted and marginal effects for top variables identified in BRTs.
+
+## Field Data
+
+First, set up the response dataset for the model. We dropped variables such as `precip` that are highly correlated or spurious, and convert some variables to factors.
+
+```{r field-bern-dat, warning=FALSE, message=FALSE}
+# make a model set: 
+# make year a decade: 
+f_floor_decade <- function(x){ return(x - x %% 10) }
+
+df_fld_mod <- df_fld %>% st_drop_geometry() %>% 
+  select(bd_positive, tmax_noaa, spei24, daylen_hr, elevation,
+         latitude_dd, AG_HYDRIC_PCT_WS, PCT_WETLANDS_REMAINING,
+         clustrate, CLUSTER, capt_yr, capt_mon, huc10, huc12) %>% 
+  filter(!is.na(elevation)) %>% # drop 6 NAs
+  mutate(year = capt_yr) %>% # make a numeric/integer version
+  mutate(decade = f_floor_decade(year)) %>% 
+  # make these factor for modeling purposes
+  mutate(across(.cols = c(CLUSTER, clustrate, capt_mon, decade,
+                          capt_yr, huc10, huc12),
+                ~as.factor(.x))) %>% 
+  # center and scale 
+  mutate(across(c(tmax_noaa, daylen_hr, elevation, spei24, latitude_dd, PCT_WETLANDS_REMAINING, AG_HYDRIC_PCT_WS, year), ~scale(.x))) %>% 
+  filter(!is.na(AG_HYDRIC_PCT_WS))
+
+
+summary(df_fld_mod)
+
+
+# fn to back transform (values * sd + mean)
+f_backtransform <- function(x){
+  x * attr(x, 'scaled:scale') + attr(x, 'scaled:center')
+}
+
+# summary(f_backtransform(df_fld_mod$spei24)) # check!
+# summary(df_fld$spei24) # check!
+```
+
+## Intercept Models
+
+First we can use intercept only models with just grouping variables (random intercepts) for Cluster, Cluster Rate, and decade to test best fit.
+
+```{r field-bern-intercept, echo=FALSE, message=FALSE}
+
+# add random intercepts (heirarchical groups)
+m1a <- glmmTMB(bd_positive ~ 1 +
+                ( 1 | CLUSTER) + ( 1 | clustrate),
+                data = df_fld_mod, 
+              family = binomial,
+              na.action = na.exclude)
+
+m1b <- glmmTMB(bd_positive ~ 1 +
+                ( 1 | CLUSTER),
+                data = df_fld_mod, 
+              family = binomial,
+              na.action = na.exclude)
+
+m1c <- glmmTMB(bd_positive ~ 1 +
+                ( 1 | clustrate),
+                data = df_fld_mod, 
+              family = binomial,
+              na.action = na.exclude)
+
+# compare
+anova(m1a, m1b, m1c) # 1a performs best
+
+```
+
+The best grouping variables (random intercepts) identified were `CLUSTER` and `clustrate`.
+
+The model (`m1a`) looks like this:
+
+`glmmTMB(bd_positive ~ 1 + ( 1 | CLUSTER) + ( 1 | clustrate)`
+
+## Covariates
+
+Now add some covariates. Best variables for **Field** model were as follows (based on BRT): 
+
+ - `tmax_noaa`: maximum temperature (monthly)
+ - `latitude_dd`: decimal degree latitude
+ - `daylen_hr`: daylength (calc for specific observation)
+ - `AG_HYDRIC_PCT_WS`: Percent of the HUC12 with agriculture on hydric soils. Calculated by overlaying soils units with ≥ 80% hydric soils from the SSURGO data with agricultural land cover classes from a custom land cover dataset that combined the 2006 National Land Cover Database (NLCD 2006) and the 2010 USDA Cropland Data Layer (CDL). Because SSURGO classifies map units as "percent hydric" rather than hydric or non-hydric, a minimum threshold of 80% hydric soils per map unit was used to distinguish hydric soils from non-hydric soils. Equation used: `Area of Agriculture on Hydric Soils / HUC12 Area * 100`
+ - `PCT_WETLANDS_REMAINING`: Percent of wetland cover remaining relative to pre-development wetland cover in the HUC12. Source data were the Existing Vegetation Type (EVT) geospatial grid dataset (March 2013 version) and the Environmental Site Potential (ESP) geospatial grid dataset (January 2010 version) from the Landscape Fire and Resource Management Planning Tools (LANDFIRE) program (http://www.landfire.gov/viewer/). The EVT grid classifies existing vegetative cover across the US at 30-meter resolution. The ESP grid classifies the climax vegetative cover that could be supported at a given site in the absence of human development at 30-meter resolution. Vegetation classes in the EVT grid were generalized to "Wetland" or "Non-Wetland" based on descriptive attributes to calculate the area of remaining wetland cover in the HUC12. Vegetation classes in the ESP grid were generalized to "Wetland" or "Non-Wetland" based on descriptive attributes to calculate the area of pre-development wetland cover in the HUC12. Equation used: Existing Wetland Area in HUC12 / Pre-Development Wetland Area in HUC12 * 100. Only calculated for HUC12s with pre-development wetland area greater than or equal to 1% of HUC12 area.
+ - `spei24`: Standardized Precipitation Evapotranspiration Index, uses both precip and potential ET to evaluate drought, and captures the main impact of increased temperatures on water demand. SPEI values range from -5 to 5, smaller values indicate stronger degrees of drought, and larger values indicate higher degrees of moisture.
+ - `elevation`
+ 
+SPEI and tmax temperature all have strong relationships to Bd+ data based on BRT modeling, and daylength had a slightly significant relationship with Bd+ data.
+
+### Model 1
+
+Uses fixed effects for all other variables.
+
+```{r field-final-mod1, echo=TRUE, message=FALSE, warning=FALSE,layout="l-body-outset", fig.cap="Field Model 1: Binomial"}
+
+# full model without year, cluster & clustrate
+m_all_1 <- glmmTMB(bd_positive ~ 
+                     elevation + tmax_noaa + AG_HYDRIC_PCT_WS +
+                     PCT_WETLANDS_REMAINING +
+                     spei24 + daylen_hr + latitude_dd +
+                     ( 1 | CLUSTER) + ( 1 | clustrate),
+                   data = df_fld_mod, 
+                   family = binomial)
+summary(m_all_1) # tmax, daylen, then spei24 strongest in this model
+
+# remember 2 is high rate, 1 is low rate
+
+# first plot by cluster (so strongest effects appear in Cluster 5)
+# and random effects of cluster rate were strongest (higher rates ~ higher odds of Bd+, lower rate ~ lower odds of Bd+)
+plot_model(m_all_1, type = "re", sort.est = TRUE, grid=FALSE)
+plot_model(m_all_1, type = "est", sort.est = TRUE) 
+```
+
+Model 1 showed the strongest relationship for `tmax_noaa`, (with increasing temperature there was a decreasing probability of Bd+). Interestingly `spei24` shows a similar relationship with Bd+, with a higher odds of Bd+ when there is less of a moisture deficit (More negative indicates a greater deficit between precipitation and PET).
+
+### Model 2
+
+Model 2 includes an interaction effect for latitude with temperature and SPEI24. Temperature remains the strongest covariate in relation to Bd, however, spei24 is also similarly strongly related (higher SPEI24, i.e., pattern of less aridity over 24 months, lower probability of being Bd+). With interaction, there is a inverse relationship in temperature~latitude on Bd+. With the interaction, there is a positive relationship between Bd+ and `latitude * tmax`. This is likely due to higher latitudes having lower temperatures.
+
+```{r field-final-mod2, echo=TRUE, message=FALSE, warning=FALSE,layout="l-body-outset", fig.cap="Field Model 2: Binomial with latitude interaction"}
+
+# try with interaction
+m_all_2 <- glmmTMB(bd_positive ~ 1 + 
+                     elevation + daylen_hr + latitude_dd*tmax_noaa +
+                     latitude_dd*spei24 + AG_HYDRIC_PCT_WS +
+                     PCT_WETLANDS_REMAINING +
+                     ( 1 | CLUSTER) + ( 1 | clustrate),
+                   data = df_fld_mod, 
+                   family = binomial)
+summary(m_all_2) # still tmax + year, spei24, daylen and tmax + year
+plot_model(m_all_2, type = "re", sort.est = TRUE, grid=FALSE)
+plot_model(m_all_2, type = "est", sort.est = TRUE) 
+
+```
+
+If we look at individual clusters or cluster rates, we see a similar pattern where higher rate clusters have a stronger association with being Bd+, while lower rate clusters have a lower association. Again, Cluster 5 has the strongest negative relationship with Bd+ while cluster 6 has the strongest positive relationship, in relation to the variables tested.
+
+### Model 3
+
+Model 3 looks at using elevation in relation to temperature and `SPEI`. Temperature is the strongest predictor, as is the relationship between elevation and temperature. Day length and Ag_HYDRIC percent was also significant. Day length is negatively associated with Bd+.
+
+```{r field-final-mod3, echo=TRUE, message=FALSE, warning=FALSE,layout="l-body-outset", fig.cap="Field Model 2: Binomial with latitude interaction"}
+
+# try with interaction: elevation
+m_all_3 <- glmmTMB(bd_positive ~ 1 + 
+                    latitude_dd + daylen_hr + tmax_noaa*elevation +
+                     spei24*elevation + AG_HYDRIC_PCT_WS +
+                     PCT_WETLANDS_REMAINING +
+                     ( 1 | CLUSTER) + ( 1 | clustrate),
+                   data = df_fld_mod, 
+                   family = binomial)
+summary(m_all_3) # still tmax + year, spei24, daylen and tmax + year
+plot_model(m_all_3, type = "est", sort.est = TRUE) 
+
+```
+
+### Model Comparison
+
+Comparing these models showed the strongest model was `model 2` ( interaction with latitude), based on AIC and logliklihood, though `model 3` (interaction with elevation) is strongest based on BIC.
+
+```{r modComparison, eval=TRUE, echo=FALSE}
+
+anova(m_all_1, m_all_2, m_all_3)  
+
+```
+
+
+## Interactions & Marginal Effects Plots
+
+<aside>
+*Marginal effects plots have values that are scaled and centered to zero.*
+</aside>
+
+Marginal effects plots by cluster showed the exact same stacked line, so these plots were not included. When aggregated (using all data across all groups), the patterns observed are clear.
+
+```{r field-margFx, warning=FALSE, message=FALSE, layout="l-page", fig.cap="Marginal Effects plots for field binomial model."}
+# viz & testing
+
+library(sjPlot)
+library(ggeffects)
+library(patchwork)
+
+m_all_f <- m_all_2
+
+# look at marginal effects
+p1 <- plot(ggpredict(m_all_f, terms=c("tmax_noaa [all]"), type="re"), ci=TRUE) +
+  ggthemes::scale_color_colorblind() +
+  labs(title = "Predicted Probabilities: Field +1/0",
+       y = "Prob Bd+") +  theme(legend.position = "right")
+p2 <- plot(ggpredict(m_all_f, terms=c("daylen_hr [all]"), type="re"), ci=TRUE) +
+  labs(title="", y = "Prob Bd+") +
+    ggthemes::scale_color_colorblind()
+p3 <- plot(ggpredict(m_all_f, terms=c("spei24 [all]"), type="re"), ci=TRUE) +
+  labs(title="", y = "Prob Bd+") +
+    ggthemes::scale_color_colorblind()
+# just elevation?
+p4 <- plot(ggpredict(m_all_f, terms=c("elevation [all]"), type="re"), ci=TRUE) +
+  labs(title = "",
+       y = "Prob Bd+") +  theme(legend.position = "right") +
+    ggthemes::scale_color_colorblind()
+# just ag hydric
+p5 <- plot(ggpredict(m_all_f, terms=c("AG_HYDRIC_PCT_WS [all]"), type="re"), ci=TRUE) +
+  labs(title = "",
+       y = "Prob Bd+") +  theme(legend.position = "right") +
+    ggthemes::scale_color_colorblind()
+
+p6 <- plot(ggpredict(m_all_f, terms=c("PCT_WETLANDS_REMAINING [all]"), type="re"), ci=TRUE) +
+  labs(title = "",
+       y = "Prob Bd+") +  theme(legend.position = "right") +
+    ggthemes::scale_color_colorblind()
+#ggsave(here("figs/field_bern_re_cluster.png"), width = 10, height = 8, units = "in", dpi = 300)
+
+p7 <- plot(ggpredict(m_all_f, terms=c("latitude_dd [all]"), type="re"), ci=TRUE) +
+  labs(title = "Predicted Probabilities: Field +1/0",
+       y = "Prob Bd+") +  theme(legend.position = "right") +
+    ggthemes::scale_color_colorblind()
+#p7
+
+# make plot with patchwork
+(p1 + p2 + p3) / (p4 + p5 + p6) +  plot_layout(guides = 'collect') 
+
+#ggsave(here("figs/field_bern_re_predicted_probs.png"), width = 10, height = 8, units = "in", dpi = 300)
+```
+
+### Marginal Effects by Cluster Rate
+
+These plots show the same data but by cluster rate. Very interesting that the SPEI trends are opposite. Interpretation of this could be that in shorter term droughts, interactions with Bd are more temperature based and driven (or cleared) by temperature. However, at longer scales (24+ months), the impact/interaction with temperature no longer drives the pattern, and different factors may be playing a bigger role (population contraction, habitat drying up, etc).
+
+```{r field-margFx1, warning=FALSE, message=FALSE, layout="l-page",  fig.cap="Marginal Effects plots for field bernoulii model by cluster rate."}
+m_all_f <- m_all_2
+
+
+# now by cluster rate
+p1cr <- plot(ggpredict(m_all_f, 
+                       terms=c("tmax_noaa [all]", "clustrate [0,1,2]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE,
+             colors = c("gray50", "darkblue","red2")) +
+  labs(title = "Predicted Probabilities: Field +1/0", 
+       color="Cluster Rate", y = "Prob Bd+") +  
+  theme(legend.position = "right")
+#p1cr
+
+p2cr <- plot(ggpredict(m_all_f, 
+                       terms=c("daylen_hr [all]", "clustrate [0,1,2]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE,
+             colors = c("gray50", "darkblue","red2")) +
+  labs(title = "", 
+       color="Cluster Rate", y = "Prob Bd+") +  
+  theme(legend.position = "right")
+#p2cr
+
+p3cr <- plot(ggpredict(m_all_f, 
+                       terms=c("spei24 [all]", "clustrate [0,1,2]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE,
+             colors = c("gray50", "darkblue","red2")) +
+  labs(title = "", 
+       color="Cluster Rate", y = "Prob Bd+") +  
+  theme(legend.position = "right")
+#pc3cr
+
+p4cr <- plot(ggpredict(m_all_f, 
+                       terms=c("elevation [all]", "clustrate [0,1,2]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE,
+             colors = c("gray50", "darkblue","red2")) +
+  labs(title = "", 
+       color="Cluster Rate", y = "Prob Bd+") +  
+  theme(legend.position = "right")
+#p4cr
+
+p5cr <- plot(ggpredict(m_all_f, 
+                       terms=c("AG_HYDRIC_PCT_WS [all]", "clustrate [0,1,2]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE,
+             colors = c("gray50", "darkblue","red2")) +
+  labs(title = "", 
+       color="Cluster Rate", y = "Prob Bd+") +  
+  theme(legend.position = "right")
+#p5cr
+
+p6cr <- plot(ggpredict(m_all_f, 
+                       terms=c("PCT_WETLANDS_REMAINING [all]", "clustrate [0,1,2]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE,
+             colors = c("gray50", "darkblue","red2")) +
+  labs(title = "", 
+       color="Cluster Rate", y = "Prob Bd+") +  
+  theme(legend.position = "right")
+
+(p1cr + p2cr + p3cr) / (p4cr + p5cr + p6cr) +
+  plot_layout(guides = 'collect') 
+
+#ggsave(here("figs/field_bern_re_clustrate.png"), width = 10, height = 8, units = "in", dpi = 300)
+
+```
+
+
+### Interactions
+
+Additional follow up to see what interaction effects may exist for `year`, `tmax_noaa`, and `spei`. These plots are of the centered and scaled **raw data**, not the model outputs.
+
+```{r field-interact-marg-temp-v-cluster, eval=TRUE, echo=FALSE}
+
+# look at year vs. tmax
+ggpredict(m_all_2, c("tmax_noaa [all]", "CLUSTER"), 
+          type = "re", ci = FALSE) %>% 
+  plot()
+```
+
+Cluster 5 and Cluster 6 had the strongest relationships with temperature, with cluster 5 having a much lower probability in relation to lower temperatures as compared to cluster 6, which had nearly 20% greater probability of Bd+ for any given temperature.
+
+```{r field-interact-marg-temp-v-lat, eval=TRUE, echo=FALSE}
+
+ggpredict(m_all_2, c("tmax_noaa [all]", "latitude_dd"), 
+          type = "re", ci = FALSE) %>% 
+  plot()
+
+#ggpredict(m_all_2, c("tmax_noaa [all]", "elevation"), 
+#          type = "re", ci = FALSE) %>% plot()
+```
+
+There was an interesting interaction effect of latitude on temperature. A much stronger relationship (with a steeper trend) was evident between lower temperatures at lower latitudes (and a higher probability of Bd+). All latitudes shared the same general trend of lower probability of Bd+ at higher temperatures, however the latitude effect reverses at temperatures at ~77F or greater, at which point higher latitudes have a higher chance of Bd+ vs. lower latitudes (whereas the opposite is true for temperatures below 77F).
+
+```{r temp-v-scaled, eval=TRUE, echo=FALSE}
+#plotly::ggplotly(
+ggtemps <- ggplot(data = df_fld_mod) + 
+  geom_hline(yintercept = 77.2, color="gray", lwd=1, lty=3) +
+  geom_vline(xintercept = -0.3, color="gray", lwd=1, lty=3) +
+  geom_line(aes(x=tmax_noaa, y=f_backtransform(tmax_noaa))) +
+  theme_bw() +
+  labs(x="Scaled tmax_noaa", y="Max air temp (F)",
+       subtitle = "Scale relationship for tmax_noaa and location of interaction (~77F)")
+ggtemps
+
+```
+
+
+```{r field-interact-marg-spei-v-lat, eval=FALSE, echo=FALSE}
+
+ggpredict(m_all_2, c("spei24 [all]", "latitude_dd"), ci = FALSE) %>%
+  plot()
+
+#ggpredict(m_all_2, c("spei24 [all]", "elevation"), ci = FALSE) %>%
+#  plot()
+```
+
+For `spei24`, the relationship with latitude is clear, at higher latitudes and less extreme precipitation/ET deficits (i.e., lower aridity or drought intensity), there is a higher probability of Bd+. 
+
+```{r field-interaction-lat, layout="l-page", echo=FALSE, eval=FALSE, fig.cap="Plot of centered/scaled data: Interactions between latitude and SPEI24"}
+
+# plot bd + and bd -
+
+# spei 24
+lat24 <- ggplot(df_fld_mod %>% filter(bd_positive==1)) + 
+  geom_point(aes(x=spei24, y=f_backtransform(latitude_dd)), color="maroon", size=3) +
+  geom_smooth(aes(x=spei24, y=f_backtransform(latitude_dd)), method = "lm", color="red4") +
+  geom_point(data=df_fld_mod %>% filter(bd_positive==0), 
+             aes(x=spei24, y=f_backtransform(latitude_dd)), color="black", pch=21) +
+  geom_smooth(data=df_fld_mod %>% filter(bd_positive==0), 
+              aes(x=spei24, y=f_backtransform(latitude_dd)), method = "lm", color="gray10", lwd=0.5, lty=2) +
+  labs(x="SPEI24", y="Latitude", subtitle="Field: SPEI 24 (Bd+ filled, Bd- open), using model input (raw) data") +
+  theme_gray()
+
+lat24 # nothing
+```
+
+```{r field-interaction-yr, layout="l-page", echo=TRUE, eval=FALSE, fig.cap="Interactions between year and spei. Figure data uses model input (raw centered and scaled)"}
+
+# what about with year??
+yr24 <- ggplot(df_fld_mod %>% filter(bd_positive==1)) + 
+  geom_point(aes(x=spei24, y=f_backtransform(year)), color="maroon", size=3) +
+  geom_smooth(aes(x=spei24, y=f_backtransform(year)), method = "lm", color="red4") +
+  geom_point(data=df_fld_mod %>% filter(bd_positive==0), 
+             aes(x=spei24, y=f_backtransform(year)), color="black", pch=21) +
+  geom_smooth(data=df_fld_mod %>% filter(bd_positive==0), 
+              aes(x=spei24, y=f_backtransform(year)), method = "lm", color="gray10", lwd=0.5, lty=2) +
+  labs(x="SPEI24", y="Year", subtitle="Field: SPEI 24 (Bd+ filled, Bd- open) using model input (raw) data") +
+  theme_gray()
+
+yr24 # interesting
+
+```
+
+```{r field-interaction-yr2, layout="l-page", echo=FALSE, eval=FALSE, fig.cap="Interactions between year and temperature. "}
+
+# what about with year??
+temp24 <- ggplot(df_fld_mod %>% filter(bd_positive==1)) + 
+  geom_point(aes(x=tmax_noaa, y=f_backtransform(year)), color="maroon", size=3) +
+  geom_smooth(aes(x=tmax_noaa, y=f_backtransform(year)), method = "lm", color="red4") +
+  geom_point(data=df_fld_mod %>% filter(bd_positive==0), 
+             aes(x=tmax_noaa, y=f_backtransform(year)), color="black", pch=21) +
+  geom_smooth(data=df_fld_mod %>% filter(bd_positive==0), 
+              aes(x=tmax_noaa, y=f_backtransform(year)), method = "lm", color="gray10", lwd=0.5, lty=2) +
+  labs(x="Tmax (centered and scaled)", y="Year", subtitle="Field: Tmax (Bd+ filled, Bd- open) using model input (raw) data") +
+  theme_gray()
+
+temp24 # interesting
+```
+
+
+<!--
+```{r test-mods, eval=FALSE, echo=FALSE}
+
+# test all possible combos
+#tst <- MuMIn::dredge(m_all) 
+
+# https://cran.microsoft.com/snapshot/2020-04-20/web/packages/DHARMa/vignettes/DHARMa.html
+# https://www.r-bloggers.com/2019/08/check-your-mixed-model-for-multicollinearity-with-performance-2/
+# https://datascienceplus.com/spatial-regression-in-r-part-1-spamm-vs-glmmtmb/
+# https://fromthebottomoftheheap.net/2017/05/04/compare-mgcv-with-glmmtmb/
+```
+
+intercept only: 
+(1 | random.factor)
+slope only: 
+(0 + fixed | random.factor)
+intercept and slope:
+(1 + fixed | random)
+-->
+
+# Museum Binomial Models
+
+Set up the data. We center and scale as before.
+
+## Museum Data
+
+```{r museum-bern-data}
+
+# make year a decade: 
+f_floor_decade <- function(x){ return(x - x %% 10) }
+
+# make a model set: 
+df_mus_mod <- df_mus %>% st_drop_geometry() %>% 
+  select(bd_positive, tmax_noaa, latitude_dd,
+         spei24, daylen_hr, 
+         capt_mon, capt_yr, clustrate, CLUSTER) %>% 
+  mutate(year = capt_yr) %>% # make a numeric/integer version
+  mutate(decade_f = f_floor_decade(year),
+         decade = as.integer(as.character(decade_f))) %>% 
+  # center and scale
+  mutate(across(c(daylen_hr, tmax_noaa, spei24, 
+                  year, latitude_dd, decade), ~scale(.x))) %>% 
+
+  # factor
+  mutate(across(.cols = c(CLUSTER, clustrate, 
+                          capt_mon, capt_yr, decade_f),
+                ~as.factor(.x)))
+
+
+summary(df_mus_mod)
+
+```
+
+## Intercept Models
+
+Set up intercept only models and test. Model `m4b` was best, with the lowest deviance and AIC/BIC, likely due to the fact that only 3 clusters exist in this data, and there are only 2 possible cluster rates (none (0), or high rate (2)).
+
+The best grouping variables (random intercepts) identified were `clustrate`.
+
+The model (`m4b`) looks like this:
+
+`glmmTMB(bd_positive ~ 1 + ( 1 | clustrate)`
+
+```{r museum-glmmb models, echo=FALSE, warning=FALSE}
+# load library
+library(glmmTMB)
+
+# cluster
+m4a <- glmmTMB(bd_positive ~ 1 + 
+                 ( 1 | CLUSTER),
+               data = df_mus_mod, 
+               family = binomial,
+               na.action = na.exclude)
+
+m4b <- glmmTMB(bd_positive ~ 1 +
+                 ( 1 | clustrate),
+               data = df_mus_mod, 
+               family = binomial,
+               na.action = na.exclude)
+
+
+m4c <- glmmTMB(bd_positive ~ 1 + 
+                 ( 1 | CLUSTER) + ( 1 | clustrate),
+               data = df_mus_mod, 
+               family = binomial,
+               na.action = na.exclude)
+
+anova(m4a, m4b, m4c) # m4b best, AIC/BIC and lowest deviance
+# likely due to the fact that only 2 clusters in this data.
+
+```
+
+
+## Covariates
+
+Now add some covariates. We are simplifying and opting for just `daylen`, `spei`, and `latitude`.
+
+ - `daylen_hr`
+ - `spei24`
+ - `latitude`
+
+### Model 1: Decade interaction
+
+We add decade as an interaction term to see what the impact/relationship may be.
+
+```{r museum-final-mods1, layout="l-body-outset", echo=TRUE, fig.cap="Museum models with decade interaction"}
+
+# add interaction 
+m_mus_1 <- glmmTMB(bd_positive ~ spei24*decade +  
+                    latitude_dd*decade + daylen_hr +
+                       ( 1 | clustrate),
+                     data = df_mus_mod, 
+                     family = binomial)
+summary(m_mus_1) 
+
+plot_model(m_mus_1, type = "est",
+           sort.est = TRUE)
+
+```
+
+Decade is the overwhelming driver of Bd, with increasing decade there is a strong correlation with Bd+. There is a slight negative correlation with long-term drought in `spei24`, but no significant effect of adding a decade:covariate interaction.
+
+### Model 2: Add spei and lat with interaction
+
+The final possible interaction model adds latitude, and there does appear to be a slight interaction between latitude and spei24.
+
+```{r museum-final-mods2, layout="l-body-outset", echo=TRUE, fig.cap="Museum models with decade"}
+
+# try with interaction
+m_mus_2 <- glmmTMB(bd_positive ~ daylen_hr +
+                     spei24*decade + latitude_dd*spei24 +
+                     latitude_dd*decade + (1 | clustrate),
+                   data = df_mus_mod, 
+                   family = binomial, na.action = "na.omit")
+summary(m_mus_2) # decade and spei
+plot_model(m_mus_2, type = "est", sort.est = TRUE)
+
+```
+
+```{r musresids, echo=FALSE, eval=FALSE}
+
+musres <- simulateResiduals(m_mus_2)
+plot(musres)
+library(effects)
+ae <- allEffects(m_mus_1)
+plot(ae)
+
+```
+
+
+### Model Comparison
+
+Model 1 was the best, (interaction between decade).
+
+```{r, eval=TRUE, echo=FALSE}
+
+anova(m_mus_1, m_mus_2) # Model 1 best here
+
+```
+
+## Interactions & Marginal Effects Plots
+
+<aside>
+*Marginal effects plots have values that are scaled and centered to zero.*
+</aside>
+
+### Marginal Effects by Cluster Rate
+
+Marginal effects plots by cluster rate.
+
+```{r mus-margFx, layout="l-page", fig.cap="Museum marginal effects plots of model 1 with decade by cluster rate", warning=FALSE, message=TRUE}
+
+library(ggeffects)
+
+m_plot <- m_mus_1
+
+# now by cluster rate
+p1m <- plot(ggpredict(m_plot, 
+                       terms=c("daylen_hr [all]", "clustrate [0,2]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE,
+             colors = c("gray30", "red2")) +
+  labs(title = "Predicted Probabilities: Museum +1/0", 
+       color="Cluster Rate", y = "Prob Bd+") +  
+  theme(legend.position = "right")
+
+p2m <- plot(ggpredict(m_plot, 
+                       terms=c("spei24 [all]", "clustrate [0,2]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE,
+             colors = c("gray30", "red2")) +
+  labs(title = "", 
+       color="Cluster Rate", y = "Prob Bd+") +  
+  theme(legend.position = "right")
+#p2m
+
+p3m <- plot(ggpredict(m_plot, 
+                       terms=c("decade [all]", "clustrate [0,2]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE,
+             colors = c("gray30", "red2")) +
+  labs(title = "", 
+       color="Cluster Rate", y = "Prob Bd+") +  
+  theme(legend.position = "right")
+
+p4m <- plot(ggpredict(m_plot, 
+                       terms=c("latitude_dd [all]", "clustrate [0,2]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE,
+             colors = c("gray30", "red2")) +
+  labs(title = "", 
+       color="Cluster Rate", y = "Prob Bd+") +  
+  theme(legend.position = "right")
+
+
+(p1m + p2m) / (p3m + p4m) +
+  plot_layout(guides = 'collect') 
+
+#ggsave(here("figs/museum_bern_margfx_plots.png"), width = 10, height = 8, units = "in", dpi = 300)
+# SPEI results should be interpreted as a relative measure of surface water surplus or deficit with respect to hydroclimate conditions of the reference period, so lower SPEI means a reduction from historical values (drier) and higher SPEI means increase from historical.
+
+```
+
+No statistical significance to latitude, but decade has strongest pattern and no other metric is significant.
+
+### Marginal Effects by Decade
+
+```{r mus-spei-decade, layout="l-page", fig.cap="Museum marginal effects plots of model 1 spei vs decade", warning=FALSE, message=TRUE}
+
+virturbo <- viridis::turbo(12)
+
+p4spei24 <- plot(ggpredict(m_plot, 
+                       terms=c("spei24 [all]", "decade [all]"),
+                       type="re"), 
+             ci=FALSE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE) +
+             #colors = viridis::cividis(12)) +
+  labs(title = "", y = "Prob Bd+", color="Decade") + 
+  scale_color_discrete(labels=c(seq(1890, 2000, 10)), type = virturbo) +
+  theme(legend.position = "right")
+
+
+p4lat <- plot(ggpredict(m_plot, 
+                       terms=c("latitude_dd [all]", "decade [all]"),
+                       type="re"), 
+             ci=FALSE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE) +
+             #colors = viridis::cividis(12)) +
+  labs(title = "", y = "Prob Bd+", color="Decade") + 
+  scale_color_discrete(labels=c(seq(1890, 2000, 10)), type = virturbo) +
+  theme(legend.position = "right")
+
+
+p4lat / p4spei24 + plot_layout(guides="collect")
+
+```
+
+### Interactions
+
+Here we can look at the interactions between SPEI and Decade. There is a much lower probability of Bd in earlier decades in relation to increasing drought. These plots are of the raw data (model inputs) that have been centered and scaled.
+
+```{r museum-interaction-1, layout="l-page", echo=TRUE, eval=TRUE, fig.cap="Museum data: Interactions between latitude vs. spei for Bd+/-"}
+
+# plot bd + and bd -
+# spei 24
+mlat24 <- ggplot(df_mus_mod %>% filter(bd_positive==1)) + 
+  geom_point(aes(x=spei24, y=latitude_dd), color="maroon", size=3) +
+  geom_smooth(aes(x=spei24, y=latitude_dd), method = "lm", color="red4") +
+  geom_point(data=df_mus_mod %>% filter(bd_positive==0), 
+             aes(x=spei24, y=latitude_dd), color="black", pch=21) +
+  geom_smooth(data=df_mus_mod %>% filter(bd_positive==0), 
+              aes(x=spei24, y=latitude_dd), method = "lm", color="gray10", lwd=0.5, lty=2) +
+  labs(x="SPEI24", y="Latitude", subtitle="SPEI 24: (Bd+ filled, Bd- open) by Cluster Rate") +
+  theme_bw() +
+  facet_wrap(clustrate~.)
+
+mlat24
+
+```
+
+
+```{r museum-interaction-2, layout="l-page", echo=TRUE, eval=TRUE, fig.cap="Museum data: Interactions between decade vs. spei for Bd+/-, faceted by Cluster Rate"}
+
+# backtransform decade:
+df_mus_mod$decade_n <- f_backtransform(df_mus_mod$decade)
+
+# plot bd + and bd -
+# spei 24
+myr24 <- ggplot(df_mus_mod %>% filter(bd_positive==1)) + 
+  geom_point(aes(x=spei24, y=decade_n), color="maroon", size=3) +
+  geom_smooth(aes(x=spei24, y=decade_n), method = "lm", color="red4") +
+  geom_point(data=df_mus_mod %>% filter(bd_positive==0), 
+             aes(x=spei24, y=decade_n), color="black", pch=21) +
+  geom_smooth(data=df_mus_mod %>% filter(bd_positive==0), 
+              aes(x=spei24, y=decade_n), method = "lm", color="gray10", lwd=0.5, lty=2) +
+  labs(x="SPEI24", y="Decade", subtitle="SPEI 24: (Bd+ filled, Bd- open) by Cluster Rate") +
+  theme_bw() +
+  facet_wrap(clustrate~.)
+
+myr24
+
+```
+
+# Field ITS Gaussian Models
+
+## Field ITS Data
+
+For the field ITS models, we filter to only ITS data (`bd_its_copies > 0`) and only data from clusters (`CLUSTER > 0`). ITS was then log transformed.
+
+Here we drop 3 outliers (`sk2019_12`, `sk2019_05`, and `sk2019_06`) that had very high ITS loads and were sitting in cold water (SJK).
+
+```{r field-gauss, eval=TRUE}
+
+# drop these outliers:
+#sk2019_12
+#sk2019_05
+#sk2019_06
+
+# filter to only real data (no NAs)
+df_fld_its <- df_fld %>% st_drop_geometry() %>% 
+  filter(bd_its_copies>0) %>% 
+  # drop outliers:
+  filter(!sampleid2 %in% c("sk2019_12","sk2019_05","sk2019_06")) %>% 
+  select(-c(field_or_museum, method_pcr_q_pcr_histology, 
+            river_system_watershed, county, locality, simplified_locality)) %>% 
+  # log transform its
+  mutate(bd_its_log = log(bd_its_copies)) %>% 
+  select(bd_its_log, tmax_noaa, spei24, 
+         AG_HYDRIC_PCT_WS, PCT_WETLANDS_REMAINING,
+         daylen_hr, elevation, svl_mm,
+         latitude_dd,
+         clustrate, CLUSTER, capt_yr, capt_mon) %>% 
+  filter(!is.na(elevation)) %>% # drop 6 NAs
+  filter(!is.na(svl_mm)) %>% 
+  # make longitude positive for modeling purposes
+  mutate(year = capt_yr, # numeric version
+         mon = as.numeric(as.character(capt_mon)),
+         decade_f = f_floor_decade(year),
+         decade = f_floor_decade(year)) %>% 
+  # make these factor for modeling purposes
+  mutate(across(.cols = c(CLUSTER, clustrate, 
+                          capt_mon, decade_f, capt_yr),
+                ~as.factor(.x))) %>% 
+  # center and scale 
+  mutate(across(c(tmax_noaa, year, daylen_hr, latitude_dd, elevation, AG_HYDRIC_PCT_WS, PCT_WETLANDS_REMAINING, spei24, svl_mm), ~scale(.x)))
+
+table(df_fld_its$CLUSTER)
+summary(df_fld_its)
+```
+
+## Intercept Models
+
+```{r interceptOnly, eval=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+
+mf1 <- glmmTMB(bd_its_log ~ 1 +
+                 ( 1 | CLUSTER),
+               na.action = na.exclude,
+               data = df_fld_its, 
+               family = "gaussian")
+
+mf2 <- glmmTMB(bd_its_log ~ 1 + 
+                 ( 1 | CLUSTER) + (1|clustrate),
+               na.action = na.exclude,
+               data = df_fld_its, 
+               family = "gaussian")
+
+mf3 <- glmmTMB(bd_its_log ~ 1 + 
+                 (1|clustrate) + (1|capt_mon),
+               na.action = na.exclude,
+               data = df_fld_its, 
+               family = "gaussian")
+
+# compare aic
+anova(mf1, mf2, mf3) # m1 is best w just CLUSTER
+
+```
+
+Based on these models, we can move forward with just `CLUSTER` as our random effect.
+
+## Covariates
+
+For the ITS models, we can use a similar collection of covariates based on the BRT results. 
+
+ - `tmax_noaa`
+ - `daylength`
+ - `AG_HYDRIC_PCT_WS`, 
+ - `PCT_WETLANDS_REMAINING`
+ - `elevation`
+ - `latitude`
+ - `spei`
+
+### UPDATE FROM HERE
+
+### Model 1: Fixed Effects
+
+Model 1 without year.
+
+```{r its-mod1, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE,layout="l-body-outset", fig.cap="ITS Model 1"}
+
+m_its_1 <- glmmTMB(bd_its_log ~ 1 + 
+                     tmax_noaa + daylen_hr + spei24 + 
+                     AG_HYDRIC_PCT_WS + PCT_WETLANDS_REMAINING +
+                     latitude_dd + elevation + svl_mm +
+                     ( 1 | CLUSTER),
+                   na.action = na.exclude,
+                   data = df_fld_its, 
+                   family = "gaussian")
+summary(m_its_1) # svl_mm highly sig, then spei24 and tmax, then latitude (slight)
+
+plot_model(m_its_1, type = "est", sort.est = TRUE) 
+
+```
+
+`svl` was highly significant in this model, with `spei` and `tmax` following, are the most significant variables in the model, with `latitude` being nearly significant (0.05> x <0.1). Elevation and daylength were not significant. With SPEI the relationship is the same as other models, stronger drought patterns correlate inversely with increasing Bd+ or ITS loads. With temperature, higher temperatures correlate negatively with Bd, and with SVL the relationship is also negative (so increasing sizes correlate negatively with Bd).
+
+### Model 2: Interactions w lat
+
+```{r its-mod2, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, layout="l-body-outset", layout="l-body-outset", fig.cap="ITS Model 2: Estimates, Random Effects, and Interactions w lat"}
+
+# year interactions
+m_its_2 <- glmmTMB(bd_its_log ~ 1 + 
+                     daylen_hr + svl_mm +
+                     AG_HYDRIC_PCT_WS + PCT_WETLANDS_REMAINING +
+                     elevation + latitude_dd*tmax_noaa + 
+                     latitude_dd*spei24 +
+                     ( 1 | CLUSTER),
+                   na.action = na.exclude,
+                   data = df_fld_its, 
+                   family = "gaussian")
+summary(m_its_2)
+plot_model(m_its_2, type = "est", sort.est = TRUE)  
+
+```
+
+
+### Model Comparison
+
+The best model was Model 1, with no interactions, but less significance than previous versions that included the 3 outliers.
+
+```{r itsmodcomp, echo=FALSE}
+
+anova(m_its_1, m_its_2) # m_its_1 best 
+
+# save out:
+save(m_its_1, file = "output/model_its_out.rda")
+```
+
+## Interactions & Marginal Effects Plots
+
+<aside>
+*Marginal effects plots have values that are scaled and centered to zero.*
+</aside>
+
+Marginal effects plots by cluster showed the exact same stacked line, so these plots were not included. When aggregated (using all data across all groups), the patterns observed are clear.
+
+```{r its-margFx1, warning=FALSE, message=FALSE, layout="l-page", fig.cap="Marginal Effects plots for field ITS model."}
+
+# viz & testing
+
+library(sjPlot)
+library(ggeffects)
+library(patchwork)
+
+# change y axis to "Predicted log_sub(10)_ ITS Copies"
+
+m_its_f <- m_its_1
+
+# look at marginal effects
+p1 <- plot(ggpredict(m_its_f, terms=c("tmax_noaa [all]"), type="re"), ci=TRUE) +
+  ggthemes::scale_color_colorblind() +
+  labs(title = "Predicted Probabilities: ITS",
+       y = "Prob Bd+") +  theme(legend.position = "right")
+p2 <- plot(ggpredict(m_its_f, terms=c("daylen_hr [all]"), type="re"), ci=TRUE) +
+  labs(title="", y = "Prob Bd+") +
+    ggthemes::scale_color_colorblind()
+
+p3 <- plot(ggpredict(m_its_f, terms=c("spei24 [all]"), type="re"), ci=TRUE) +
+  labs(title="", y = "Prob Bd+") +
+    ggthemes::scale_color_colorblind()
+
+p4 <- plot(ggpredict(m_its_f, terms=c("svl_mm [all]"), type="re"), ci=TRUE) +
+  labs(title="", y = "Prob Bd+") +
+    ggthemes::scale_color_colorblind()
+
+p4b <- plot(ggpredict(m_its_f, terms=c("latitude_dd [all]"), type="re"), ci=TRUE) +
+  labs(title="", y = "Prob Bd+") +
+    ggthemes::scale_color_colorblind()
+
+
+p5 <- plot(ggpredict(m_its_f, terms=c("AG_HYDRIC_PCT_WS [all]"), type="re"), ci=TRUE) +
+  labs(title="", y = "Prob Bd+") +
+    ggthemes::scale_color_colorblind()
+
+p6 <- plot(ggpredict(m_its_f, terms=c("PCT_WETLANDS_REMAINING [all]"), type="re"), ci=TRUE) +
+  labs(title="", y = "Prob Bd+") +
+    ggthemes::scale_color_colorblind()
+
+# just latitude?
+p_lat <- plot(ggpredict(m_its_f, terms=c("latitude_dd [all]"), type="re"), ci=TRUE) +
+  labs(title = "Predicted Probabilities: ITS",
+       y = "Prob Bd+") +  theme(legend.position = "right") +
+    ggthemes::scale_color_colorblind()+
+  cowplot::theme_cowplot() +
+  theme(plot.background = element_rect("white")) +
+  labs(x="Latitude")
+#p_lat
+
+# ggsave(filename = here("figs/marg_fx_ITS_latitude.png"), 
+#        width = 11, height = 8, dpi=300)
+
+# just elevation?
+p_elev <- plot(ggpredict(m_its_f, terms=c("elevation [all]"), type="re"), ci=TRUE) +
+  labs(title = "Predicted Probabilities: ITS",
+       y = "Prob Bd+") +  theme(legend.position = "right") +
+    ggthemes::scale_color_colorblind()
+#p_elev
+
+# make plot with patchwork
+(p1 + p4b) / (p3 + p4) +  plot_layout(guides = 'collect') 
+
+#(p1 + p2 + p3) / (p4 + p5 + p6) +  plot_layout(guides = 'collect') 
+
+```
+
+### Marginal Effects by Cluster
+
+These plots include by CLUSTER instead of aggregated. 
+
+```{r its-margFx2, warning=FALSE, message=FALSE, layout="l-page",  fig.cap="Marginal Effects plots for field ITS models by cluster."}
+
+m_its_f <- m_its_1
+
+
+# now by cluster
+p1cr <- plot(ggpredict(m_its_f, 
+                       terms=c("tmax_noaa [all]", "CLUSTER [0,1,3,5]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE) +
+             #colors = c("gray50", "darkblue","red2")) +
+  labs(#title = "Predicted Probabilities: ITS", 
+    title="",
+       color="Cluster", y = "Prob Bd+", x="Tmax (scaled)") +  
+  scale_y_continuous(labels = scales::percent_format(scale=1, accuracy = 1))+
+  theme(legend.position = "right") +
+  cowplot::theme_cowplot() +
+  theme(plot.background = element_rect("white"))
+p1cr
+
+#ggsave(filename = here("figs/S9_marg_fx_ITS_tmax_cluster_notitle.png"), 
+#       width = 11, height = 8, dpi=300)
+
+p2cr <- plot(ggpredict(m_its_f, 
+                       terms=c("svl_mm [all]", "CLUSTER [0,1,3,5]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE) +
+  labs(title = "", 
+       color="Cluster", y = "Prob Bd+") +  
+  theme(legend.position = "right") +
+    scale_y_continuous(labels = scales::percent_format(scale=1, accuracy = 1))+
+  theme(legend.position = "right") +
+  cowplot::theme_cowplot() +
+  theme(plot.background = element_rect("white"))
+#p2cr
+p3cr_lat <- plot(ggpredict(m_its_f, 
+                       terms=c("latitude_dd [all]", "CLUSTER [all]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE) +
+  labs(title = "", x="Latitude (scaled)",
+        color="Cluster", y = "Prob Bd+") +  
+  theme(legend.position = "right") +
+  scale_y_continuous(labels = scales::percent_format(scale=1, accuracy = 1))+
+  cowplot::theme_cowplot() +
+  theme(plot.background = element_rect("white"))
+p3cr_lat
+
+#ggsave(filename = here("figs/S9_marg_fx_ITS_latitude_cluster.png"), 
+#       width = 11, height = 8, dpi=300)
+
+
+p4cr <- plot(ggpredict(m_its_f, 
+                       terms=c("spei24 [all]", "CLUSTER [0,1,3,5]"),
+                       type="re"), 
+             ci=TRUE, ci.style =  "dash", alpha = 0.15, 
+             line.size = 1.7, add.data = FALSE) +
+  labs(title = "", 
+       color="Cluster", y = "Prob Bd+") +  
+  theme(legend.position = "right") +
+  scale_y_continuous(labels = scales::percent_format(scale=1, accuracy = 1))+
+  cowplot::theme_cowplot() +
+  theme(plot.background = element_rect("white"))
+p4cr
+
+(p1cr + p2cr) / (p3cr_lat + p4cr) +
+  plot_layout(guides = 'collect') 
+
+p1cr + p3cr_lat + plot_layout(guides="collect")
+
+ggsave(here("figs/field_bern_re_clustrate.png"), width = 10, height = 8, units = "in", dpi = 300)
+
+```
+
+### Interactions
+
+Additional follow up to see what interaction effects may exist for `tmax_noaa`, `svl_mm` and `spei`.
+
+```{r its-interact-marg, eval=FALSE, echo=FALSE}
+
+# look at svl vs. tmax
+ggpredict(m_its_1, c("tmax_noaa [all]", "svl_mm")) %>% 
+  plot()
+
+ggpredict(m_its_1, c("spei24 [all]", "svl_mm")) %>% 
+  plot()
+#ggpredict(m_its_1, c("svl_mm [all]", "year")) %>%
+#  plot()
+
+```
+
+
+```{r its-interaction-lat, layout="l-page", echo=FALSE, eval=FALSE, fig.cap="Interactions between latitude, svl, and SPEI24"}
+
+# plot bd + and bd -
+
+# spei 24
+latits24 <- ggplot(df_fld_its) + 
+  geom_point(aes(x=spei24, y=f_backtransform(latitude_dd)), fill="maroon", size=3, pch=21, alpha=0.5) +
+  geom_smooth(aes(x=spei24, y=f_backtransform(latitude_dd)), method = "glm", color="red4") +
+  labs(x="SPEI24", y="Latitude", subtitle="ITS: SPEI 24") +
+  theme_bw()
+
+latits24
+
+# spei 24
+svlits24 <- ggplot(df_fld_its) + 
+  geom_point(aes(x=svl_mm, y=f_backtransform(latitude_dd)), fill="maroon", size=3, pch=21, alpha=0.5) +
+  geom_smooth(aes(x=svl_mm, y=f_backtransform(latitude_dd)), method = "lm", color="red4") +
+  labs(x="SVL (mm)", y="Latitude", subtitle="ITS: SVL vs Lat") +
+  theme_bw()
+
+svlits24
+
+# spei 24
+tempits24 <- ggplot(df_fld_its) + 
+  geom_point(aes(x=tmax_noaa, y=bd_its_log), fill="maroon", size=3, pch=21, alpha=0.5) +
+  geom_smooth(aes(x=tmax_noaa, y=bd_its_log), method = "glm", color="red4") +
+  labs(x="Tmax (centered and scaled)", y="log(ITS)", subtitle="ITS: ITS vs Tmax") +
+  theme_bw()
+tempits24
+
+```
+
+# Map of Cluster IDs
+
+```{r}
+
+library(mapview)
+mapviewOptions(fgb=FALSE)
+
+df_fld_sf <- df_fld %>% 
+  distinct(latitude_dd, longitude_dd, .keep_all = TRUE) %>% 
+  filter(CLUSTER > 0)
+
+mapview(df_fld_sf, zcol="CLUSTER", layer.name="Cluster ID")
+
+```
+
+
+
